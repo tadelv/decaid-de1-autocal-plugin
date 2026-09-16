@@ -415,6 +415,30 @@ test('baseline ownership is retained when restoration verification fails', async
   assert.deepEqual(harness.storageValue.machines['12345'], { baselineMultiplier: 0.7, lastPluginAppliedMultiplier: 0.9, ownsCurrentMultiplier: true });
 });
 
+test('a write the machine does not keep is not reported as applied', async () => {
+  // The DE1 accepts the POST but keeps its previous calibration (an emulated
+  // DE1 reports 0.0 whatever is written). The plugin must not claim ownership
+  // of the value it did not set.
+  const harness = await validRun({
+    current: 0.8,
+    desired1: 0.98,
+    desired2: 0.98,
+    fetchHook: ({ url, options }) => {
+      if (new URL(url).pathname === '/api/v1/machine/calibration' && options.method === 'POST') {
+        return response({ ok: true });
+      }
+    },
+  });
+  assert.equal(harness.postCalls().length, 1);
+  assert.match(harness.logs.at(-1), /reason=calibration_verify_failed/);
+  assert.match(harness.logs.at(-1), /verified=0\.800/);
+  assert.equal(harness.calibration, 0.8);
+  const record = harness.storageValue.machines['12345'];
+  assert.equal(record.baselineMultiplier, 0.8);
+  assert.equal(record.lastPluginAppliedMultiplier, null, 'a value the machine kept must not be recorded as applied');
+  assert.equal(record.ownsCurrentMultiplier, false, 'ownership must not be claimed for a value the machine kept');
+});
+
 test('profile races cannot write stale work', async () => {
   const profileA = { title: 'A' };
   const profileB = { title: 'B' };

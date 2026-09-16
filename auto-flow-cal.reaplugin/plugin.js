@@ -512,6 +512,12 @@ function createPlugin(host) {
       return { ok: false, reason: "calibration_verify_failed" };
     }
     if (!verified || !positive(verified.flowMultiplier)) return { ok: false, reason: "calibration_verify_failed" };
+    // Restoration only counts when the machine reports the baseline back;
+    // otherwise ownership is retained (design §22.4) instead of quietly
+    // claiming the plugin removed an override it never removed.
+    if (Math.abs(verified.flowMultiplier - record.baselineMultiplier) > OWNERSHIP_EPSILON) {
+      return { ok: false, reason: "calibration_verify_failed" };
+    }
 
     var oldOwns = record.ownsCurrentMultiplier;
     var oldApplied = record.lastPluginAppliedMultiplier;
@@ -746,6 +752,16 @@ function createPlugin(host) {
     }
     if (!verified || !positive(verified.flowMultiplier)) {
       return addFields(baseDecision(title, "skip", "calibration_verify_failed"), common);
+    }
+    // The write landed only if the machine now reports the value we asked for.
+    // calFlowEst stores three decimals, so anything beyond the ownership
+    // epsilon means the DE1 kept its previous calibration; claiming ownership
+    // of it would misreport a manual value as ours and re-post on every
+    // evaluation (design §32 calibration_verify_failed).
+    if (Math.abs(verified.flowMultiplier - target) > OWNERSHIP_EPSILON) {
+      return addFields(baseDecision(title, "skip", "calibration_verify_failed"), addFields(common, {
+        verified: verified.flowMultiplier.toFixed(3)
+      }));
     }
 
     var oldApplied = record.lastPluginAppliedMultiplier;
