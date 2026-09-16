@@ -1,0 +1,53 @@
+{
+  "id": "decaid.autoflowcal",
+  "author": "Decent",
+  "name": "Auto Flow Calibration",
+  "description": "Automatically calibrate DE1 flow from the two latest matching gravimetric shots",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "permissions": [
+    "log",
+    "api",
+    "pluginStorage",
+    "events.workflow",
+    "events.shots"
+  ],
+  "settings": {
+    "Enabled": {
+      "type": "boolean",
+      "label": "Automatic flow calibration",
+      "default": true,
+      "description": "Automatically calibrate DE1 flow from the two latest matching gravimetric shots."
+    },
+    "Damping": {
+      "type": "number",
+      "label": "Adjustment damping",
+      "default": 0.5,
+      "description": "Fraction of the calculated calibration error applied per profile evaluation."
+    },
+    "MaxAdjustment": {
+      "type": "number",
+      "label": "Maximum adjustment",
+      "default": 0.1,
+      "description": "Maximum multiplier change automatic calibration may apply in one evaluation."
+    },
+    "MinimumMultiplier": {
+      "type": "number",
+      "label": "Minimum multiplier",
+      "default": 0.35,
+      "description": "Lowest multiplier automatic calibration may use."
+    },
+    "MaximumMultiplier": {
+      "type": "number",
+      "label": "Maximum multiplier",
+      "default": 2.0,
+      "description": "Highest multiplier automatic calibration may use."
+    },
+    "DryRun": {
+      "type": "boolean",
+      "label": "Dry run",
+      "default": false,
+      "description": "Calculate and log decisions without changing DE1 calibration."
+    }
+  }
+}
