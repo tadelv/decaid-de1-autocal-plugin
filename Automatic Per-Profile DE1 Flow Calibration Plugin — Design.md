@@ -746,7 +746,7 @@ end   = min(machineEnd, scaleEnd)
 Keep it only when:
 
 ```text
-end - start >= 3.0 seconds
+end - start >= 2.5 seconds
 ```
 
 These resulting intervals are the **only** data analysed for flow calibration.
@@ -1434,13 +1434,25 @@ maximum weight-flow slope         = 0.35 g/s²
 
 maximum machine sample gap        = 500 ms
 maximum distinct scale sample gap = 1000 ms
-minimum simultaneous-flat region  = 3.0 s
-
+minimum simultaneous-flat region  = 2.5 s
 maximum two-shot disagreement     = 10%
 deadband                          = 0.01
 ```
 
 Changing these constants requires an intentional plugin revision and corresponding regression tests.
+
+### Revision: 2026-09-16 — minimum simultaneous-flat region 3.0 s to 2.5 s
+
+Measured against 60 recent real shots and 8 simulated MockDe1 shots, the 3.0 s
+minimum sat just above the flat stretches that actually occur: longest
+machine-flat runs were 1.87 s (median, real) and 3-7 s (mock), while
+simultaneous overlaps clustered at 2.0-2.6 s. At 3.0 s only 6 of 60 real shots
+and 2 of 8 mock shots contained a usable region, so the plugin could not act even
+when the curves were genuinely steady. The stability requirement is enforced by
+the slope limits above, which reject transient regions inside any window; the
+window length only governs how much noise is averaged out. Lowering it to 2.5 s
+raises mock coverage to 7 of 8 with 6 of 6 consecutive pairs still agreeing
+within the 10% gate. Regions shorter than 2.5 s remain rejected.
 
 ---
 
@@ -1665,7 +1677,7 @@ function estimateShot(shot) {
       machineIntervals,
       scaleIntervals
     ).filter(
-      region => duration(region) >= 3.0
+      region => duration(region) >= 2.5
     );
 
   if (regions.length === 0) {
@@ -1759,7 +1771,7 @@ Pure estimator tests must cover:
 18. machine timestamp reversal;
 19. machine gap >500 ms splits interval;
 20. scale gap >1000 ms splits interval;
-21. overlap shorter than 3 seconds rejected;
+21. overlap shorter than 2.5 seconds rejected;
 22. multiple disjoint simultaneous-flat regions all contribute;
 23. transition region between two flat regions does not contribute;
 24. machine-flow interpolation at interval boundary;

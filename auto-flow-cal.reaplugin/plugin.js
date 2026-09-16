@@ -18,7 +18,7 @@ function createPlugin(host) {
   var MAX_WEIGHT_FLOW_SLOPE = 0.35;
   var MAX_MACHINE_GAP = 0.5;
   var MAX_SCALE_GAP = 1.0;
-  var MIN_REGION_DURATION = 3.0;
+  var MIN_REGION_DURATION = 2.5;
   var AGREEMENT_LIMIT = 0.10;
   var DEADBAND = 0.01;
   var RESOLUTION = 0.001;

@@ -132,17 +132,17 @@ test('rejects timestamp reversal and gaps that break continuity', () => {
   }, 'insufficient_stable_region');
 });
 
-test('rejects an overlap shorter than three seconds', () => {
+test('rejects an overlap shorter than the minimum region', () => {
   expectRejected({
-    machineTimes: Array.from({ length: 6 }, (_, i) => i * 0.5),
-    scaleTimes: Array.from({ length: 6 }, (_, i) => i * 0.5),
+    machineTimes: Array.from({ length: 5 }, (_, i) => i * 0.5),
+    scaleTimes: Array.from({ length: 5 }, (_, i) => i * 0.5),
   }, 'insufficient_stable_region');
 
-  const exactlyThree = makeShot({
-    machineTimes: Array.from({ length: 7 }, (_, i) => i * 0.5),
-    scaleTimes: Array.from({ length: 7 }, (_, i) => i * 0.5),
+  const exactlyMinimum = makeShot({
+    machineTimes: Array.from({ length: 6 }, (_, i) => i * 0.5),
+    scaleTimes: Array.from({ length: 6 }, (_, i) => i * 0.5),
   });
-  assert.equal(estimator.estimateShot(exactlyThree).accepted, true);
+  assert.equal(estimator.estimateShot(exactlyMinimum).accepted, true);
 });
 
 test('uses every disjoint flat region and ignores transition regions', () => {
