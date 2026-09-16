@@ -1,0 +1,49 @@
+name: release
+
+on:
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Tests
+        run: npm test
+
+      # Decaid rejects a release whose tag and manifest version disagree.
+      - name: Check tag matches manifest version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./auto-flow-cal.reaplugin/manifest.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match manifest version $version" >&2
+            exit 1
+          fi
+
+      - name: Build plugin zip
+        run: |
+          set -euo pipefail
+          zip -r "auto-flow-cal-${GITHUB_REF_NAME}.zip" auto-flow-cal.reaplugin \
+            -x '*.DS_Store'
+          unzip -l "auto-flow-cal-${GITHUB_REF_NAME}.zip"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "auto-flow-cal-${GITHUB_REF_NAME}.zip"
