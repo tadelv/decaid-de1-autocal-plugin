@@ -1,7 +1,7 @@
 function createPlugin(host) {
   "use strict";
 
-  var PLUGIN_ID = "decaid.autoflowcal";
+  var PLUGIN_ID = "auto-flow-cal.reaplugin";
   var VERSION = "1.0.0";
   var API_BASE = "http://localhost:8080";
   var STORAGE_KEY = "state";
@@ -365,7 +365,31 @@ function createPlugin(host) {
   }
 
   function validPersistentState(value) {
-    return value && value.version === 1 && value.machines && typeof value.machines === "object" && !Array.isArray(value.machines);
+    if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1 ||
+        !value.machines || typeof value.machines !== "object" || Array.isArray(value.machines)) {
+      return false;
+    }
+
+    var topKeys = Object.keys(value);
+    if (topKeys.length !== 2 || !hasOwn(value, "version") || !hasOwn(value, "machines")) return false;
+
+    var serials = Object.keys(value.machines);
+    for (var i = 0; i < serials.length; i++) {
+      var serial = serials[i];
+      if (!usableSerial(serial)) return false;
+      var record = value.machines[serial];
+      if (!record || typeof record !== "object" || Array.isArray(record)) return false;
+
+      var recordKeys = Object.keys(record);
+      if (recordKeys.length !== 3 ||
+          !hasOwn(record, "baselineMultiplier") ||
+          !hasOwn(record, "lastPluginAppliedMultiplier") ||
+          !hasOwn(record, "ownsCurrentMultiplier")) return false;
+      if (!positive(record.baselineMultiplier) || typeof record.ownsCurrentMultiplier !== "boolean") return false;
+      if (record.lastPluginAppliedMultiplier !== null && !positive(record.lastPluginAppliedMultiplier)) return false;
+      if (record.ownsCurrentMultiplier !== (record.lastPluginAppliedMultiplier !== null)) return false;
+    }
+    return true;
   }
 
   function hydrate(value) {

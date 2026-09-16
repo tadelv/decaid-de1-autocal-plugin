@@ -1,0 +1,418 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+
+const root = path.join(__dirname, '..');
+const packageDir = path.join(root, 'auto-flow-cal.reaplugin');
+const pluginSource = fs.readFileSync(path.join(packageDir, 'plugin.js'), 'utf8');
+const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, 'manifest.json'), 'utf8'));
+
+function loadPlugin(host, fetch) {
+  const context = { fetch, setTimeout, clearTimeout };
+  vm.createContext(context);
+  vm.runInContext(`${pluginSource}\nthis.createPlugin = createPlugin;`, context);
+  return context.createPlugin(host);
+}
+
+function response(body, status = 200) {
+  return { status, ok: status < 400, json: async () => body };
+}
+
+function stableShot(id, profile, serial = '12345', desired = 0.9, oldMultiplier = 0.8, options = {}) {
+  const times = Array.from({ length: 9 }, (_, i) => i * 0.5);
+  const workflow = {
+    profile,
+    machine: {
+      provenanceStatus: options.provenanceStatus || 'captured',
+      model: options.model || 'DE1Pro',
+      serialNumber: options.serial || serial,
+      flowCalibration: options.flowCalibration === undefined ? oldMultiplier : options.flowCalibration,
+    },
+  };
+  const measurements = times.map(timestamp => ({
+    machine: { timestamp, state: 'espresso', pressure: 9, flow: oldMultiplier * 2 },
+    scale: { timestamp, weight: 5 + desired * 2 * timestamp, weightFlow: desired * 2 },
+  }));
+  if (options.noScale) for (const measurement of measurements) delete measurement.scale;
+  if (options.oneScale) {
+    for (let i = 1; i < measurements.length; i++) delete measurements[i].scale;
+  }
+  if (options.noFlat) {
+    for (const measurement of measurements) measurement.machine.flow = oldMultiplier * (2 + 0.5 * measurement.machine.timestamp);
+  }
+  return { id, workflow, measurements };
+}
+
+function createHarness({
+  current = 0.8,
+  machine = { model: 'DE1Pro', serialNumber: '12345' },
+  stored,
+  settings,
+  history = [],
+  fullShots = [],
+  fetchHook,
+} = {}) {
+  const calls = [];
+  const logs = [];
+  let calibration = current;
+  let storageValue = stored;
+  let storageWrites = [];
+  let plugin;
+  const host = {
+    log(message) { logs.push(message); },
+    storage(command) {
+      calls.push({ type: 'storage', command });
+      if (command.type === 'write') {
+        storageValue = command.data;
+        storageWrites.push(command.data);
+      }
+      return Promise.resolve();
+    },
+  };
+
+  const fetch = async (url, options = {}) => {
+    calls.push({ type: 'fetch', url, options });
+    if (fetchHook) {
+      const custom = await fetchHook({ url, options, calls, get calibration() { return calibration; }, set calibration(value) { calibration = value; } });
+      if (custom) return custom;
+    }
+    const parsed = new URL(url);
+    const requestPath = parsed.pathname;
+    if (requestPath === '/api/v1/machine/info') return response(machine);
+    if (requestPath === '/api/v1/machine/calibration') {
+      if (options.method === 'POST') {
+        calibration = JSON.parse(options.body).flowMultiplier;
+        return response({ ok: true });
+      }
+      return response({ flowMultiplier: calibration });
+    }
+    if (requestPath === '/api/v1/machine/state') return response({ state: 'idle' });
+    if (requestPath === '/api/v1/shots') {
+      if (parsed.searchParams.has('ids')) return response(fullShots);
+      return response(history);
+    }
+    throw new Error(`unexpected request ${url}`);
+  };
+
+  plugin = loadPlugin(host, fetch);
+
+  return {
+    plugin,
+    calls,
+    logs,
+    get calibration() { return calibration; },
+    get storageValue() { return storageValue; },
+    storageWrites,
+    async start(pluginSettings = settings) {
+      await plugin.onLoad(pluginSettings);
+      await plugin.onEvent({ name: 'storageRead', payload: { key: 'state', value: storageValue } });
+    },
+    async workflow(profile) {
+      await plugin.onEvent({ name: 'workflowUpdated', payload: { profile } });
+    },
+    async event(name, payload) {
+      await plugin.onEvent({ name, payload });
+    },
+    fetchCalls() { return calls.filter(call => call.type === 'fetch'); },
+    historyCalls() { return this.fetchCalls().filter(call => new URL(call.url).pathname === '/api/v1/shots' && !new URL(call.url).searchParams.has('ids')); },
+    fullShotCalls() { return this.fetchCalls().filter(call => new URL(call.url).pathname === '/api/v1/shots' && new URL(call.url).searchParams.has('ids')); },
+    postCalls() { return this.fetchCalls().filter(call => call.options.method === 'POST'); },
+  };
+}
+
+async function validRun(options = {}) {
+  const profile = options.profile || { title: 'Profile', notes: 'same' };
+  const shot1 = options.shot1 || stableShot('a', profile, '12345', options.desired1 || 0.9, options.old1 || 0.8, options.shotOptions1);
+  const shot2 = options.shot2 || stableShot('b', profile, '12345', options.desired2 || options.desired1 || 0.9, options.old2 || 0.8, options.shotOptions2);
+  const harness = createHarness({
+    current: options.current === undefined ? 0.8 : options.current,
+    machine: options.machine,
+    stored: options.stored,
+    settings: options.settings,
+    history: [
+      { id: shot1.id, workflow: shot1.workflow },
+      { id: shot2.id, workflow: shot2.workflow },
+    ],
+    fullShots: [shot1, shot2],
+    fetchHook: options.fetchHook,
+  });
+  await harness.start(options.settings);
+  await harness.workflow(profile);
+  return harness;
+}
+
+test('package, manifest, and runtime plugin IDs are consistent', () => {
+  const packageName = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).name;
+  assert.equal(path.basename(packageDir), manifest.id);
+  assert.equal(manifest.id, packageName);
+  const host = { log() {}, storage() { return Promise.resolve(); } };
+  const plugin = loadPlugin(host, async () => response({}));
+  assert.equal(plugin.id, manifest.id);
+});
+
+test('manifest requests exactly the design permissions', () => {
+  assert.deepEqual(manifest.permissions, ['log', 'api', 'pluginStorage', 'events.workflow', 'events.shots']);
+});
+
+test('explicit DE1 allowlist accepts every traditional model and rejects others', () => {
+  for (const model of ['DE1', 'DE1Plus', 'DE1Pro', 'DE1XL', 'DE1Cafe', 'DE1XXL', 'DE1XXXL']) {
+    assert.equal(loadPlugin({ log() {}, storage() {} }, async () => response({})).__test.isEligibleDE1({ model, serialNumber: 's' }), 's');
+  }
+  for (const model of ['Unknown', 'Bengle', 'DE1Future', 'DE10']) {
+    assert.equal(loadPlugin({ log() {}, storage() {} }, async () => response({})).__test.isEligibleDE1({ model, serialNumber: 's' }), null);
+  }
+});
+
+test('ineligible or unidentified machines never request history', async () => {
+  for (const machine of [
+    { model: 'Unknown', serialNumber: 's' },
+    { model: 'Bengle', serialNumber: 's' },
+    { model: 'FutureMachine', serialNumber: 's' },
+    { model: 'DE1Pro', serialNumber: '0' },
+  ]) {
+    const harness = createHarness({ machine, history: [] });
+    await harness.start();
+    await harness.workflow({ title: 'Profile' });
+    assert.equal(harness.historyCalls().length, 0, machine.model);
+  }
+});
+
+test('history access is exactly two filtered descending records with no fallback or pagination', async () => {
+  const profile = { title: 'A profile' };
+  const harness = await validRun({ profile });
+  const request = harness.historyCalls()[0];
+  const url = new URL(request.url);
+  assert.equal(url.searchParams.get('profileTitle'), 'A profile');
+  assert.equal(url.searchParams.get('limit'), '2');
+  assert.equal(url.searchParams.get('offset'), '0');
+  assert.equal(url.searchParams.get('order'), 'desc');
+  assert.equal(harness.historyCalls().length, 1);
+  assert.equal(harness.fullShotCalls().length, 1);
+  assert.equal(new URL(harness.fullShotCalls()[0].url).searchParams.has('profileTitle'), false);
+  assert.deepEqual(new URL(harness.fullShotCalls()[0].url).searchParams.getAll('ids'), ['a', 'b']);
+});
+
+test('history and metadata failures stop before full-shot fetch or POST', async () => {
+  const profile = { title: 'Profile', notes: 'current' };
+  const cases = [
+    ['one history item', { history: [{ id: 'a', workflow: stableShot('a', profile).workflow }] }, 'insufficient_history'],
+    ['different exact profile', { profile, shot1: stableShot('a', { title: 'Profile', notes: 'old' }), shot2: stableShot('b', profile) }, 'profile_mismatch'],
+    ['different serial', { shotOptions1: { serial: 'other' } }, 'different_machine'],
+    ['uncaptured provenance', { shotOptions1: { provenanceStatus: 'inferred' } }, 'uncaptured_machine_provenance'],
+    ['missing historical multiplier', { shotOptions1: { flowCalibration: null } }, 'missing_historical_multiplier'],
+  ];
+  for (const [name, options, reason] of cases) {
+    const harness = options.history ? createHarness({ history: options.history }) : await validRun({ ...options, profile });
+    if (options.history) {
+      await harness.start();
+      await harness.workflow(profile);
+    }
+    assert.equal(harness.fullShotCalls().length, 0, name);
+    assert.equal(harness.postCalls().length, 0, name);
+    assert.match(harness.logs.at(-1), new RegExp(`reason=${reason}`), name);
+  }
+});
+
+test('valid agreeing shots apply an estimate with no scale-independent shortcut', async () => {
+  const harness = await validRun({ desired1: 0.9, current: 0.8 });
+  assert.equal(harness.postCalls().length, 1);
+  assert.equal(JSON.parse(harness.postCalls()[0].options.body).flowMultiplier, 0.85);
+  assert.match(harness.logs.at(-1), /action=apply/);
+});
+
+test('disagreeing shots do not write', async () => {
+  const harness = await validRun({ desired1: 0.9, desired2: 1.2, current: 0.8 });
+  assert.equal(harness.postCalls().length, 0);
+  assert.match(harness.logs.at(-1), /reason=shots_disagree/);
+});
+
+test('damping happens before the maximum adjustment cap and target rounds to 0.001', async () => {
+  const capped = await validRun({ desired1: 1.3, current: 0.8 });
+  assert.equal(JSON.parse(capped.postCalls()[0].options.body).flowMultiplier, 0.9);
+  const rounded = await validRun({ desired1: 0.923, current: 0.8 });
+  assert.equal(JSON.parse(rounded.postCalls()[0].options.body).flowMultiplier, 0.862);
+});
+
+test('external override becomes the new baseline and is not overwritten in that cycle', async () => {
+  const harness = await validRun({
+    stored: { version: 1, machines: { '12345': { baselineMultiplier: 0.7, lastPluginAppliedMultiplier: 0.9, ownsCurrentMultiplier: true } } },
+    current: 0.8,
+  });
+  assert.equal(harness.postCalls().length, 0);
+  assert.match(harness.logs.at(-1), /reason=external_override/);
+  assert.deepEqual(harness.storageValue.machines['12345'], { baselineMultiplier: 0.8, lastPluginAppliedMultiplier: null, ownsCurrentMultiplier: false });
+});
+
+test('missing scale evidence restores an owned baseline but not an externally owned value', async () => {
+  const owned = await validRun({
+    stored: { version: 1, machines: { '12345': { baselineMultiplier: 0.7, lastPluginAppliedMultiplier: 0.9, ownsCurrentMultiplier: true } } },
+    current: 0.9,
+    shotOptions1: { noScale: true },
+  });
+  assert.equal(owned.postCalls().length, 1);
+  assert.equal(JSON.parse(owned.postCalls()[0].options.body).flowMultiplier, 0.7);
+  assert.deepEqual(owned.storageValue.machines['12345'], { baselineMultiplier: 0.7, lastPluginAppliedMultiplier: null, ownsCurrentMultiplier: false });
+
+  const notOwned = await validRun({
+    stored: { version: 1, machines: { '12345': { baselineMultiplier: 0.7, lastPluginAppliedMultiplier: null, ownsCurrentMultiplier: false } } },
+    current: 0.9,
+    shotOptions1: { noScale: true },
+  });
+  assert.equal(notOwned.postCalls().length, 0);
+
+  const noFlat = await validRun({ shotOptions1: { noFlat: true } });
+  assert.equal(noFlat.postCalls().length, 0);
+  assert.match(noFlat.logs.at(-1), /reason=insufficient_stable_region/);
+});
+
+test('baseline ownership is retained when restoration verification fails', async () => {
+  let calibrationGets = 0;
+  const harness = await validRun({
+    stored: { version: 1, machines: { '12345': { baselineMultiplier: 0.7, lastPluginAppliedMultiplier: 0.9, ownsCurrentMultiplier: true } } },
+    current: 0.9,
+    shotOptions1: { noScale: true },
+    fetchHook: ({ url, options }) => {
+      if (new URL(url).pathname === '/api/v1/machine/calibration' && !options.method) {
+        calibrationGets++;
+        if (calibrationGets >= 2) throw new Error('verification failed');
+      }
+    },
+  });
+  assert.equal(harness.postCalls().length, 1);
+  assert.deepEqual(harness.storageValue.machines['12345'], { baselineMultiplier: 0.7, lastPluginAppliedMultiplier: 0.9, ownsCurrentMultiplier: true });
+});
+
+test('profile races cannot write stale work', async () => {
+  const profileA = { title: 'A' };
+  const profileB = { title: 'B' };
+  const shotA1 = stableShot('a1', profileA);
+  const shotA2 = stableShot('a2', profileA);
+  let releaseState;
+  let stateRequested;
+  const stateReady = new Promise(resolve => { stateRequested = resolve; });
+  const race = createHarness({
+    history: [{ id: 'a1', workflow: shotA1.workflow }, { id: 'a2', workflow: shotA2.workflow }],
+    fullShots: [shotA1, shotA2],
+    fetchHook: async ({ url }) => {
+      if (new URL(url).pathname === '/api/v1/machine/state') {
+        stateRequested();
+        await new Promise(resolve => { releaseState = resolve; });
+      }
+    },
+  });
+  await race.start();
+  const first = race.workflow(profileA);
+  await stateReady;
+  const second = race.workflow(profileB);
+  releaseState();
+  await Promise.all([first, second]);
+  assert.equal(race.postCalls().length, 0);
+});
+
+test('machine replacement immediately before POST aborts for another DE1 and for Bengle', async () => {
+  for (const replacement of [
+    { model: 'DE1Pro', serialNumber: 'other' },
+    { model: 'Bengle', serialNumber: '12345' },
+  ]) {
+    let infoCalls = 0;
+    const harness = await validRun({ fetchHook: ({ url }) => {
+      if (new URL(url).pathname === '/api/v1/machine/info') {
+        infoCalls++;
+        if (infoCalls > 1) return response(replacement);
+      }
+    } });
+    assert.equal(harness.postCalls().length, 0);
+    assert.match(harness.logs.at(-1), /reason=machine_changed_during_analysis/);
+  }
+});
+
+test('shotStored only dirties history, and a shot stored during analysis is not lost', async () => {
+  const harness = await validRun();
+  const before = harness.fetchCalls().length;
+  await harness.event('shotStored', { id: 'new' });
+  assert.equal(harness.fetchCalls().length, before);
+  await harness.workflow({ title: 'Profile', notes: 'same' });
+  assert.ok(harness.historyCalls().length >= 2);
+
+  let release;
+  let listReturned;
+  let blockFullFetch = false;
+  const listReady = new Promise(resolve => { listReturned = resolve; });
+  const slow = createHarness({
+    history: [{ id: 'a', workflow: stableShot('a', { title: 'Profile', notes: 'same' }).workflow }, { id: 'b', workflow: stableShot('b', { title: 'Profile', notes: 'same' }).workflow }],
+    fullShots: [stableShot('a', { title: 'Profile', notes: 'same' }), stableShot('b', { title: 'Profile', notes: 'same' })],
+    fetchHook: async ({ url }) => {
+      if (blockFullFetch && new URL(url).pathname === '/api/v1/shots' && new URL(url).searchParams.has('ids')) {
+        listReturned();
+        await new Promise(resolve => { release = resolve; });
+      }
+    },
+  });
+  await slow.start();
+  await slow.workflow({ title: 'Profile', notes: 'same' });
+  blockFullFetch = true;
+  await slow.event('shotStored', { id: 'during' });
+  const pending = slow.workflow({ title: 'Profile', notes: 'same' });
+  await listReady;
+  await slow.event('shotStored', { id: 'during-analysis' });
+  release();
+  await pending;
+  blockFullFetch = false;
+  const count = slow.historyCalls().length;
+  await slow.workflow({ title: 'Profile', notes: 'same' });
+  assert.equal(slow.historyCalls().length, count + 1);
+});
+
+test('same profile is ignored without dirty history and shotUpdated is ignored', async () => {
+  const harness = await validRun();
+  const before = harness.fetchCalls().length;
+  await harness.workflow({ title: 'Profile', notes: 'same' });
+  await harness.event('shotUpdated', { id: 'a' });
+  assert.equal(harness.fetchCalls().length, before);
+});
+
+test('busy machine, REST failure, and unload/shutdown never start a retry or fallback write', async () => {
+  const busy = await validRun({ fetchHook: ({ url }) => {
+    if (new URL(url).pathname === '/api/v1/machine/state') return response({ state: 'espresso' });
+  } });
+  assert.equal(busy.postCalls().length, 0);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(busy.postCalls().length, 0);
+
+  const failed = createHarness({ fetchHook: ({ url }) => {
+    if (new URL(url).pathname === '/api/v1/shots') throw new Error('REST down');
+  } });
+  await failed.start();
+  await failed.workflow({ title: 'Profile' });
+  assert.equal(failed.postCalls().length, 0);
+
+  const lifecycle = await validRun({ settings: { Enabled: false } });
+  await lifecycle.event('shutdown');
+  await lifecycle.plugin.onUnload();
+  assert.equal(lifecycle.postCalls().length, 0);
+});
+
+test('dry run performs complete analysis without POST or ownership', async () => {
+  const harness = await validRun({ settings: { DryRun: true }, current: 0.8 });
+  assert.equal(harness.postCalls().length, 0);
+  assert.ok(harness.fetchCalls().some(call => new URL(call.url).pathname === '/api/v1/machine/state'));
+  assert.ok(harness.fetchCalls().some(call => new URL(call.url).pathname === '/api/v1/machine/info'));
+  assert.match(harness.logs.at(-1), /action=dry_run/);
+  assert.equal(harness.storageValue.machines['12345'].ownsCurrentMultiplier, false);
+});
+
+test('malformed persisted state is discarded instead of granting ownership', async () => {
+  const malformed = [
+    { version: 2, machines: {} },
+    { version: 1, machines: { '12345': { baselineMultiplier: 1, lastPluginAppliedMultiplier: 0.9, ownsCurrentMultiplier: 'yes' } } },
+    { version: 1, machines: { '12345': { baselineMultiplier: 1, lastPluginAppliedMultiplier: 0, ownsCurrentMultiplier: true } } },
+    { version: 1, machines: { '12345': { baselineMultiplier: 1, lastPluginAppliedMultiplier: null, ownsCurrentMultiplier: false, extra: true } } },
+  ];
+  for (const stored of malformed) {
+    const harness = await validRun({ stored, current: 0.9, shotOptions1: { noScale: true } });
+    assert.equal(harness.postCalls().length, 0);
+    assert.equal(harness.storageValue.machines['12345'].ownsCurrentMultiplier, false);
+  }
+});

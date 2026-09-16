@@ -1,5 +1,5 @@
 {
-  "id": "decaid.autoflowcal",
+  "id": "auto-flow-cal.reaplugin",
   "author": "Decent",
   "name": "Auto Flow Calibration",
   "description": "Automatically calibrate DE1 flow from the two latest matching gravimetric shots",
