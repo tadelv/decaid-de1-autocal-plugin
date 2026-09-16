@@ -185,12 +185,24 @@ test('interpolates machine flow and scale weight at region boundaries', () => {
 });
 
 test('rejects invalid regional weight gain and base volume', () => {
+  // Zero weight gain is invalid.
   expectRejected({ scaleWeight: () => 5 }, 'invalid_shot_estimate');
+  // Negative weight gain is invalid too (the scale reports losing weight while
+  // every sample stays above the minimum weight).
+  expectRejected({ scaleWeight: t => 10 - 0.5 * t }, 'invalid_shot_estimate');
   expectRejected({ flow: () => 0 }, 'insufficient_stable_region');
   const invalidMultiplier = makeShot({ oldMultiplier: 0 });
   const result = estimator.estimateShot(invalidMultiplier);
   assert.equal(result.reason, 'missing_historical_multiplier');
   assert.ok(Number.isNaN(estimator.integrateTrapezoidal([machine(0, 2), machine(1, 2)], 0, 1, 0)));
+
+  // The base-volume guard in estimateShot is unreachable through estimateShot:
+  // every region is bounded by machine-flat intervals, which are built from
+  // adjacent machine samples, so the integration window is always covered.
+  // The guard's precondition is therefore covered on the helper instead.
+  const samples = [machine(0, 2), machine(1, 2), machine(2, 2)];
+  assert.equal(estimator.integrateTrapezoidal(samples, 0, 2, 1), 4);
+  assert.ok(Number.isNaN(estimator.integrateTrapezoidal(samples, 0, 3, 1)));
 });
 
 test('rejects shot estimates outside the configured automatic range', () => {

@@ -27,7 +27,10 @@ On a workflow change (or after new history appears), the plugin:
    verifies the result with a follow-up `GET`.
 
 Every other outcome is fail-closed: no evidence, no write. Decisions are
-reported as one structured `[auto-flow-cal]` log line per evaluation.
+reported as one structured `[auto-flow-cal]` log line per evaluation, using the
+reasons from the design plus `calibration_read_failed` and `no_baseline` for
+state the design leaves undefined, and the action `restore` for a verified
+baseline restoration.
 
 ## Install
 
@@ -94,12 +97,14 @@ machine identity or be applied without gravimetric evidence.
 ## Development
 
 ```bash
-npm test    # estimator + plugin conformance suite (node --test, no dependencies)
+npm test    # manifest, estimator and plugin conformance suite (node --test, no dependencies)
 npm run check
 ```
 
 The tests load the production `plugin.js` into a `node:vm` sandbox with a mocked
-host and `fetch`, so there is no duplicated logic to drift.
+host and `fetch`, and the fixtures mirror Decaid's real serialization (paginated
+`{items,...}` history envelope, nested machine state, ISO-8601 timestamps), so
+there is no duplicated logic to drift.
 
 Releases: bump `version` in `auto-flow-cal.reaplugin/manifest.json`, tag
 `vX.Y.Z` (the tag must match the manifest version), and the release workflow

@@ -49,5 +49,6 @@
       "default": false,
       "description": "Calculate and log decisions without changing DE1 calibration."
     }
-  }
+  },
+  "api": []
 }

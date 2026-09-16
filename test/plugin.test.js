@@ -410,6 +410,10 @@ test('profile races cannot write stale work', async () => {
   releaseState();
   await Promise.all([first, second]);
   assert.equal(race.postCalls().length, 0);
+  assert.ok(
+    race.logs.some(line => /reason=profile_changed_during_analysis/.test(line)),
+    'the raced evaluation must abandon its stale work',
+  );
 });
 
 test('machine replacement immediately before POST aborts for another DE1 and for Bengle', async () => {
@@ -495,6 +499,7 @@ test('busy machine, REST failure, and unload/shutdown never start a retry or fal
   assert.equal(busy.postCalls().length, 0);
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(busy.postCalls().length, 0);
+  assert.match(busy.logs.at(-1), /reason=machine_busy/);
 
   const failed = createHarness({ fetchHook: ({ url }) => {
     if (new URL(url).pathname === '/api/v1/shots') throw new Error('REST down');
@@ -502,11 +507,13 @@ test('busy machine, REST failure, and unload/shutdown never start a retry or fal
   await failed.start();
   await failed.workflow({ title: 'Profile' });
   assert.equal(failed.postCalls().length, 0);
+  assert.match(failed.logs.at(-1), /reason=history_fetch_failed/);
 
   const lifecycle = await validRun({ settings: { Enabled: false } });
   await lifecycle.event('shutdown');
   await lifecycle.plugin.onUnload();
   assert.equal(lifecycle.postCalls().length, 0);
+  assert.match(lifecycle.logs.at(-1), /reason=disabled/);
 });
 
 test('dry run performs complete analysis without POST or ownership', async () => {
