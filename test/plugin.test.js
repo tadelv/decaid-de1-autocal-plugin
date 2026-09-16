@@ -368,9 +368,12 @@ test('dry run detects an external override without persisting ownership changes'
   assert.match(harness.logs.at(-1), /reason=external_override/);
   assert.equal(harness.storageWrites.length, 0);
 
+  // Nothing changed, so the next dry-run evaluation reports the same override
+  // instead of quietly adopting it as a new baseline.
   await harness.workflow(profile);
-  assert.match(harness.logs.at(-1), /action=dry_run/);
+  assert.match(harness.logs.at(-1), /reason=external_override/);
   assert.equal(harness.storageWrites.length, 0);
+  assert.equal(harness.fullShotCalls().length, 0);
 });
 
 test('missing scale evidence restores an owned baseline but not an externally owned value', async () => {

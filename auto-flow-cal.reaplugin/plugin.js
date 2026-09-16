@@ -572,10 +572,14 @@ function createPlugin(host) {
     var record = machineRecord(serial);
     if (record.ownsCurrentMultiplier && positive(record.lastPluginAppliedMultiplier) &&
         Math.abs(currentMultiplier - record.lastPluginAppliedMultiplier) > OWNERSHIP_EPSILON) {
-      record.baselineMultiplier = currentMultiplier;
-      record.lastPluginAppliedMultiplier = null;
-      record.ownsCurrentMultiplier = false;
-      if (!settings.DryRun) await savePersistentState();
+      // Another actor changed calibration. A dry run observes and reports this
+      // without touching any state, persistent or in memory (design §31).
+      if (!settings.DryRun) {
+        record.baselineMultiplier = currentMultiplier;
+        record.lastPluginAppliedMultiplier = null;
+        record.ownsCurrentMultiplier = false;
+        await savePersistentState();
+      }
       return baseDecision(title, "skip", "external_override");
     }
 
@@ -834,13 +838,13 @@ function createPlugin(host) {
     }
     if (event.name === "shutdown") {
       state.generation++;
-      if (state.storageReady && !settings.DryRun) await savePersistentState();
+      if (state.storageReady) await savePersistentState();
     }
   }
 
   async function onUnload() {
     state.generation++;
-    if (state.storageReady && !settings.DryRun) await savePersistentState();
+    if (state.storageReady) await savePersistentState();
   }
 
   return {
