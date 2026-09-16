@@ -181,6 +181,9 @@ test('package, manifest, and runtime plugin IDs are consistent', () => {
   const host = { log() {}, storage() { return Promise.resolve(); } };
   const plugin = loadPlugin(host, async () => response({}));
   assert.equal(plugin.id, manifest.id);
+  // The Decaid installer rejects a release whose tag disagrees with the
+  // manifest version, so the runtime version must not drift either.
+  assert.equal(plugin.version, manifest.version);
 });
 
 test('manifest requests exactly the design permissions', () => {

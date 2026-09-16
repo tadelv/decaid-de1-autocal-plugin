@@ -2,7 +2,7 @@ function createPlugin(host) {
   "use strict";
 
   var PLUGIN_ID = "auto-flow-cal.reaplugin";
-  var VERSION = "1.0.0";
+  var VERSION = "1.1.0";
   var API_BASE = "http://localhost:8080";
   var STORAGE_KEY = "state";
 
