@@ -531,9 +531,7 @@ function createPlugin(host) {
 
   async function evidenceFailure(title, reason, shotId, serial, record, context) {
     var result;
-    if (settings.DryRun) {
-      result = baseDecision(title, "dry_run", reason);
-    } else if (record && record.ownsCurrentMultiplier) {
+    if (record && record.ownsCurrentMultiplier && !settings.DryRun) {
       var restored = await restoreBaseline(serial, record, context);
       if (restored.ok) {
         result = baseDecision(title, "restore", reason);
@@ -577,7 +575,7 @@ function createPlugin(host) {
       record.baselineMultiplier = currentMultiplier;
       record.lastPluginAppliedMultiplier = null;
       record.ownsCurrentMultiplier = false;
-      await savePersistentState();
+      if (!settings.DryRun) await savePersistentState();
       return baseDecision(title, "skip", "external_override");
     }
 
@@ -586,13 +584,16 @@ function createPlugin(host) {
       if (!(await savePersistentState())) return baseDecision(title, "skip", "calibration_read_failed");
     }
 
-    var summaries;
+    var historyResponse;
     try {
-      summaries = await apiGet("/api/v1/shots?profileTitle=" + encodeURIComponent(title === undefined ? "" : title) + "&limit=2&offset=0&order=desc");
+      historyResponse = await apiGet("/api/v1/shots?profileTitle=" + encodeURIComponent(title === undefined ? "" : title) + "&limit=2&offset=0&order=desc");
     } catch (error) {
       return baseDecision(title, "skip", "history_fetch_failed");
     }
-    if (!Array.isArray(summaries)) return baseDecision(title, "skip", "history_fetch_failed");
+    var summaries = Array.isArray(historyResponse)
+      ? historyResponse
+      : (historyResponse && typeof historyResponse === "object" && Array.isArray(historyResponse.items) ? historyResponse.items : null);
+    if (summaries === null) return baseDecision(title, "skip", "history_fetch_failed");
     context.evidenceRead = true;
     if (summaries.length !== 2) return await evidenceFailure(title, "insufficient_history", undefined, serial, record, context);
 
@@ -628,12 +629,16 @@ function createPlugin(host) {
     requested[String(id2)] = (requested[String(id2)] || 0) + 1;
     var returned = {};
     for (var j = 0; j < fullShots.length; j++) {
-      if (!fullShots[j] || fullShots[j].id === undefined || fullShots[j].id === null) return baseDecision(title, "skip", "shot_fetch_failed");
+      if (!fullShots[j] || fullShots[j].id === undefined || fullShots[j].id === null) {
+        context.evidenceRead = false;
+        return baseDecision(title, "skip", "shot_fetch_failed");
+      }
       var returnedId = String(fullShots[j].id);
       returned[returnedId] = (returned[returnedId] || 0) + 1;
     }
     for (var requestedId in requested) {
       if (!hasOwn(returned, requestedId) || returned[requestedId] !== requested[requestedId]) {
+        context.evidenceRead = false;
         return baseDecision(title, "skip", "shot_fetch_failed");
       }
     }
@@ -764,7 +769,6 @@ function createPlugin(host) {
     try {
       if (!settings.Enabled) {
         result = baseDecision(title, "skip", "disabled");
-        context.evidenceRead = true;
       } else {
         result = await evaluateInner(workflow, context);
       }
@@ -830,13 +834,13 @@ function createPlugin(host) {
     }
     if (event.name === "shutdown") {
       state.generation++;
-      if (state.storageReady) await savePersistentState();
+      if (state.storageReady && !settings.DryRun) await savePersistentState();
     }
   }
 
   async function onUnload() {
     state.generation++;
-    if (state.storageReady) await savePersistentState();
+    if (state.storageReady && !settings.DryRun) await savePersistentState();
   }
 
   return {

@@ -9,6 +9,30 @@ const packageDir = path.join(root, 'auto-flow-cal.reaplugin');
 const pluginSource = fs.readFileSync(path.join(packageDir, 'plugin.js'), 'utf8');
 const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, 'manifest.json'), 'utf8'));
 
+// Decaid serializes timestamps as ISO-8601 strings. Epoch-zero offsets keep the
+// synthetic seconds used by the fixtures exactly representable.
+function iso(seconds) {
+  return new Date(Math.round(seconds * 1000)).toISOString();
+}
+
+// MachineSnapshot.toJson()-shaped snapshot with the nested state object.
+function machineSnapshot(timestamp, state, flow, pressure) {
+  return {
+    timestamp,
+    state,
+    flow,
+    pressure,
+    targetFlow: flow,
+    targetPressure: pressure,
+    mixTemperature: 92,
+    groupTemperature: 93,
+    targetMixTemperature: 93,
+    targetGroupTemperature: 93,
+    profileFrame: 0,
+    steamTemperature: 0,
+  };
+}
+
 function loadPlugin(host, fetch) {
   const context = { fetch, setTimeout, clearTimeout };
   vm.createContext(context);
@@ -31,16 +55,19 @@ function stableShot(id, profile, serial = '12345', desired = 0.9, oldMultiplier 
       flowCalibration: options.flowCalibration === undefined ? oldMultiplier : options.flowCalibration,
     },
   };
-  const measurements = times.map(timestamp => ({
-    machine: { timestamp, state: 'espresso', pressure: 9, flow: oldMultiplier * 2 },
-    scale: { timestamp, weight: 5 + desired * 2 * timestamp, weightFlow: desired * 2 },
+  const measurements = times.map(t => ({
+    machine: machineSnapshot(
+      iso(t),
+      { state: 'espresso', substate: 'pouring' },
+      oldMultiplier * (options.noFlat ? 2 + 0.5 * t : 2),
+      9,
+    ),
+    scale: { timestamp: iso(t), weight: 5 + desired * 2 * t, weightFlow: desired * 2 },
+    volume: null,
   }));
   if (options.noScale) for (const measurement of measurements) delete measurement.scale;
   if (options.oneScale) {
     for (let i = 1; i < measurements.length; i++) delete measurements[i].scale;
-  }
-  if (options.noFlat) {
-    for (const measurement of measurements) measurement.machine.flow = oldMultiplier * (2 + 0.5 * measurement.machine.timestamp);
   }
   return { id, workflow, measurements };
 }
@@ -58,7 +85,7 @@ function createHarness({
   const logs = [];
   let calibration = current;
   let storageValue = stored;
-  let storageWrites = [];
+  const storageWrites = [];
   let plugin;
   const host = {
     log(message) { logs.push(message); },
@@ -80,7 +107,9 @@ function createHarness({
     }
     const parsed = new URL(url);
     const requestPath = parsed.pathname;
-    if (requestPath === '/api/v1/machine/info') return response(machine);
+    if (requestPath === '/api/v1/machine/info') {
+      return response({ version: 'v1.1.0', GHC: true, extra: {}, ...machine });
+    }
     if (requestPath === '/api/v1/machine/calibration') {
       if (options.method === 'POST') {
         calibration = JSON.parse(options.body).flowMultiplier;
@@ -88,10 +117,12 @@ function createHarness({
       }
       return response({ flowMultiplier: calibration });
     }
-    if (requestPath === '/api/v1/machine/state') return response({ state: 'idle' });
+    if (requestPath === '/api/v1/machine/state') {
+      return response(machineSnapshot(iso(0), { state: 'idle', substate: 'idle' }, 0, 0));
+    }
     if (requestPath === '/api/v1/shots') {
       if (parsed.searchParams.has('ids')) return response(fullShots);
-      return response(history);
+      return response({ items: history, total: history.length, limit: 2, offset: 0 });
     }
     throw new Error(`unexpected request ${url}`);
   };
@@ -179,6 +210,19 @@ test('ineligible or unidentified machines never request history', async () => {
   }
 });
 
+test('every allowlisted DE1 model drives a real evaluation through to the history request', async () => {
+  for (const model of ['DE1', 'DE1Plus', 'DE1Pro', 'DE1XL', 'DE1Cafe', 'DE1XXL', 'DE1XXXL']) {
+    const harness = await validRun({
+      machine: { model, serialNumber: '12345' },
+      shotOptions1: { model },
+      shotOptions2: { model },
+    });
+    assert.equal(harness.historyCalls().length, 1, model);
+    assert.equal(harness.fullShotCalls().length, 1, model);
+    assert.equal(harness.postCalls().length, 1, model);
+  }
+});
+
 test('history access is exactly two filtered descending records with no fallback or pagination', async () => {
   const profile = { title: 'A profile' };
   const harness = await validRun({ profile });
@@ -192,6 +236,46 @@ test('history access is exactly two filtered descending records with no fallback
   assert.equal(harness.fullShotCalls().length, 1);
   assert.equal(new URL(harness.fullShotCalls()[0].url).searchParams.has('profileTitle'), false);
   assert.deepEqual(new URL(harness.fullShotCalls()[0].url).searchParams.getAll('ids'), ['a', 'b']);
+});
+
+test('the real {items} history envelope reaches full-shot fetch, and non-array items fail closed', async () => {
+  const applied = await validRun({ desired1: 0.9, current: 0.8 });
+  assert.equal(applied.historyCalls().length, 1);
+  assert.equal(applied.fullShotCalls().length, 1);
+  assert.equal(applied.postCalls().length, 1);
+  assert.match(applied.logs.at(-1), /action=apply/);
+
+  const profile = { title: 'Profile', notes: 'same' };
+  const bare = await validRun({
+    profile,
+    fetchHook: ({ url }) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === '/api/v1/shots' && !parsed.searchParams.has('ids')) {
+        const shot1 = stableShot('a', profile);
+        const shot2 = stableShot('b', profile);
+        return response([
+          { id: shot1.id, workflow: shot1.workflow },
+          { id: shot2.id, workflow: shot2.workflow },
+        ]);
+      }
+    },
+  });
+  assert.equal(bare.fullShotCalls().length, 1);
+  assert.equal(bare.postCalls().length, 1);
+
+  for (const items of [undefined, 'nope', { nested: true }]) {
+    const broken = await validRun({
+      fetchHook: ({ url }) => {
+        const parsed = new URL(url);
+        if (parsed.pathname === '/api/v1/shots' && !parsed.searchParams.has('ids')) {
+          return response({ items, total: 0, limit: 2, offset: 0 });
+        }
+      },
+    });
+    assert.equal(broken.fullShotCalls().length, 0, String(items));
+    assert.equal(broken.postCalls().length, 0, String(items));
+    assert.match(broken.logs.at(-1), /reason=history_fetch_failed/, String(items));
+  }
 });
 
 test('history and metadata failures stop before full-shot fetch or POST', async () => {
@@ -243,6 +327,23 @@ test('external override becomes the new baseline and is not overwritten in that 
   assert.equal(harness.postCalls().length, 0);
   assert.match(harness.logs.at(-1), /reason=external_override/);
   assert.deepEqual(harness.storageValue.machines['12345'], { baselineMultiplier: 0.8, lastPluginAppliedMultiplier: null, ownsCurrentMultiplier: false });
+});
+
+test('dry run detects an external override without persisting ownership changes', async () => {
+  const profile = { title: 'Profile', notes: 'same' };
+  const harness = await validRun({
+    profile,
+    settings: { DryRun: true },
+    stored: { version: 1, machines: { '12345': { baselineMultiplier: 0.7, lastPluginAppliedMultiplier: 0.9, ownsCurrentMultiplier: true } } },
+    current: 0.8,
+  });
+  assert.equal(harness.postCalls().length, 0);
+  assert.match(harness.logs.at(-1), /reason=external_override/);
+  assert.equal(harness.storageWrites.length, 0);
+
+  await harness.workflow(profile);
+  assert.match(harness.logs.at(-1), /action=dry_run/);
+  assert.equal(harness.storageWrites.length, 0);
 });
 
 test('missing scale evidence restores an owned baseline but not an externally owned value', async () => {
@@ -373,6 +474,20 @@ test('same profile is ignored without dirty history and shotUpdated is ignored',
   assert.equal(harness.fetchCalls().length, before);
 });
 
+test('a disabled evaluation does not mark the history revision as evaluated', async () => {
+  const profile = { title: 'Profile' };
+  const harness = createHarness({ settings: { Enabled: false } });
+  await harness.start({ Enabled: false });
+  await harness.event('shotStored', { id: 'pre-existing' });
+  await harness.workflow(profile);
+  assert.equal(harness.logs.length, 1);
+  assert.match(harness.logs.at(-1), /reason=disabled/);
+  await harness.workflow(profile);
+  assert.equal(harness.logs.length, 2);
+  assert.match(harness.logs.at(-1), /reason=disabled/);
+  assert.equal(harness.historyCalls().length, 0);
+});
+
 test('busy machine, REST failure, and unload/shutdown never start a retry or fallback write', async () => {
   const busy = await validRun({ fetchHook: ({ url }) => {
     if (new URL(url).pathname === '/api/v1/machine/state') return response({ state: 'espresso' });
@@ -401,6 +516,14 @@ test('dry run performs complete analysis without POST or ownership', async () =>
   assert.ok(harness.fetchCalls().some(call => new URL(call.url).pathname === '/api/v1/machine/info'));
   assert.match(harness.logs.at(-1), /action=dry_run/);
   assert.equal(harness.storageValue.machines['12345'].ownsCurrentMultiplier, false);
+});
+
+test('dry run logs evidence failures as skip rather than dry_run', async () => {
+  const harness = await validRun({ settings: { DryRun: true }, shotOptions1: { noScale: true } });
+  assert.equal(harness.postCalls().length, 0);
+  assert.match(harness.logs.at(-1), /action=skip/);
+  assert.match(harness.logs.at(-1), /reason=no_scale_data/);
+  assert.doesNotMatch(harness.logs.at(-1), /action=dry_run/);
 });
 
 test('malformed persisted state is discarded instead of granting ownership', async () => {

@@ -14,7 +14,11 @@ function loadEstimator(settings) {
 
 const estimator = loadEstimator();
 
-function machine(timestamp, flow, pressure = 9, state = 'espresso') {
+function iso(seconds) {
+  return new Date(Math.round(seconds * 1000)).toISOString();
+}
+
+function machine(timestamp, flow, pressure = 9, state = { state: 'espresso', substate: 'pouring' }) {
   return { machine: { timestamp, state, pressure, flow } };
 }
 
@@ -25,16 +29,16 @@ function makeShot({
   scaleTimes = machineTimes,
   flow = () => 2,
   pressure = () => 9,
-  state = () => 'espresso',
+  state = () => ({ state: 'espresso', substate: 'pouring' }),
   scaleWeight = t => 5 + desired * 2 * t,
   weightFlow = () => desired * 2,
   withScale = true,
 } = {}) {
-  const measurements = machineTimes.map(t => machine(t, oldMultiplier * flow(t), pressure(t), state(t)));
+  const measurements = machineTimes.map(t => machine(iso(t), oldMultiplier * flow(t), pressure(t), state(t)));
   if (withScale) {
     for (const timestamp of scaleTimes) {
       measurements.push({ scale: {
-        timestamp,
+        timestamp: iso(timestamp),
         weight: scaleWeight(timestamp),
         weightFlow: weightFlow(timestamp),
       } });
@@ -71,6 +75,13 @@ test('uses irregular machine timestamps and trapezoidal integration', () => {
     [machine(0, 1), machine(0.25, 3), machine(1, 3)], 0, 1, 1,
   );
   assert.equal(integrated, 2.75);
+});
+
+test('rejects a base volume whose window is not covered by machine samples', () => {
+  const samples = [machine(0, 2), machine(1, 2), machine(2, 2)];
+  assert.equal(estimator.integrateTrapezoidal(samples, 0, 2, 1), 4);
+  assert.ok(Number.isNaN(estimator.integrateTrapezoidal(samples, 0, 3, 1)));
+  assert.ok(Number.isNaN(estimator.integrateTrapezoidal(samples, -1, 1, 1)));
 });
 
 test('deduplicates scale timestamps and repeated observations do not add evidence', () => {
