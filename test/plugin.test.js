@@ -296,7 +296,34 @@ test('history and metadata failures stop before full-shot fetch or POST', async 
     assert.equal(harness.fullShotCalls().length, 0, name);
     assert.equal(harness.postCalls().length, 0, name);
     assert.match(harness.logs.at(-1), new RegExp(`reason=${reason}`), name);
+    // No fallback search: one bounded list request, never a retry with a
+    // larger limit, a different query or an unfiltered sweep.
+    assert.equal(harness.historyCalls().length, 1, name);
+    const url = new URL(harness.historyCalls()[0].url);
+    assert.equal(url.searchParams.get('limit'), '2', name);
+    assert.equal(url.searchParams.get('offset'), '0', name);
+    assert.equal(url.searchParams.get('order'), 'desc', name);
+    assert.equal(url.searchParams.get('profileTitle'), profile.title, name);
   }
+});
+
+test('an unusable newest record never triggers a search for an older shot', async () => {
+  const profile = { title: 'Profile', notes: 'current' };
+  const scrap = stableShot('scrap', profile, '12345', 0.9, 0.8, { noScale: true });
+  const good = stableShot('good', profile);
+  const harness = createHarness({
+    history: [
+      { id: scrap.id, workflow: scrap.workflow },
+      { id: good.id, workflow: good.workflow },
+    ],
+    fullShots: [scrap, good],
+  });
+  await harness.start();
+  await harness.workflow(profile);
+  assert.equal(harness.postCalls().length, 0);
+  assert.match(harness.logs.at(-1), /reason=no_scale_data/);
+  assert.equal(harness.historyCalls().length, 1, 'no shot #3 lookup');
+  assert.deepEqual(new URL(harness.fullShotCalls()[0].url).searchParams.getAll('ids'), ['scrap', 'good']);
 });
 
 test('valid agreeing shots apply an estimate with no scale-independent shortcut', async () => {
