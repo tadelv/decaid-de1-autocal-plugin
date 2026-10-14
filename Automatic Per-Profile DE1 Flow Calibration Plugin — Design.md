@@ -204,25 +204,28 @@ It must not be interpreted as calibration derived from a scaleless shot.
 
 For v1, "same profile" means:
 
-> the complete normalized `workflow.profile` JSON returned by Decaid is structurally identical.
+> the same extraction program: structurally identical profile `version` and `steps`.
 
-Do not decide which profile fields are "semantically meaningful."
+`steps` is the program the DE1 runs; `version` is its schema version. The rest of
+`workflow.profile` is descriptive (`title`, `author`, `notes`,
+`beverage_type`), a per-shot stop condition (`target_weight`, `target_volume`,
+`target_volume_count_start`) or tank preheat (`tank_temperature`). None of it
+changes the machine-flow / weight-flow ratio computed over a stable region, so
+none of it may reject an otherwise usable older shot.
 
-Do not strip:
+Included in identity:
 
-- title;
-- author;
-- notes;
+- title, which the history query already keys on, so it costs nothing and keeps two programs that differ only by name apart;
 - version;
-- targets;
-- temperatures;
-- steps;
-- limiters;
-- any other serialized profile field.
+- steps, including step names, pump mode, transitions, exits, temperatures, pressures, flows, seconds, volumes, weights, sensors and limiters.
 
-The current Profile model serializes those fields directly. 
+Excluded from identity:
 
-This is intentionally conservative.
+- author, notes, beverage_type;
+- target_weight, target_volume, target_volume_count_start;
+- tank_temperature.
+
+Shots are pre-filtered by exact title through `profileTitle`.
 
 ## 6.1 Canonical representation
 
@@ -260,6 +263,17 @@ Do not introduce a hashing dependency solely for profile matching.
 Workflow ID is not part of profile identity.
 
 Workflow context is not part of profile identity.
+
+## 6.2 Revision: 2026-10-14 — identity narrowed to the extraction program
+
+The original rule compared the complete `workflow.profile` JSON and explicitly
+forbade interpreting fields. Real use broke on it: changing only the record's
+`target_weight` between two shots produced `profile_mismatch`, discarding
+evidence that was perfectly valid, because a stop condition is not part of the
+program. Decaid exposes no profile record ID, hash or parent reference on shots
+or on `workflow.profile` — `workflow.id` is the bean record and is identical for
+every profile — so identity must be derived from content: the title the
+history query already uses, plus `version` and `steps`, the program itself.
 
 ---
 
@@ -746,7 +760,7 @@ end   = min(machineEnd, scaleEnd)
 Keep it only when:
 
 ```text
-end - start >= 2.5 seconds
+end - start >= 2.0 seconds
 ```
 
 These resulting intervals are the **only** data analysed for flow calibration.
@@ -1434,7 +1448,7 @@ maximum weight-flow slope         = 0.35 g/s²
 
 maximum machine sample gap        = 500 ms
 maximum distinct scale sample gap = 1000 ms
-minimum simultaneous-flat region  = 2.5 s
+minimum simultaneous-flat region  = 2.0 s
 maximum two-shot disagreement     = 10%
 deadband                          = 0.01
 ```
@@ -1453,6 +1467,20 @@ the slope limits above, which reject transient regions inside any window; the
 window length only governs how much noise is averaged out. Lowering it to 2.5 s
 raises mock coverage to 7 of 8 with 6 of 6 consecutive pairs still agreeing
 within the 10% gate. Regions shorter than 2.5 s remain rejected.
+
+### Revision: 2026-10-14 — minimum simultaneous-flat region 2.5 s to 2.0 s
+
+Measured against 16 consecutive real shots on one DE1Pro (14 on one 9 bar
+profile, 2 on a lever-emulation profile), the 2.5 s minimum rejected shots whose
+plateaus were genuinely steady. Machine-flat intervals are built from adjacent
+sample pairs, so one noisy pair splits a plateau: the longest machine-flat run of
+a 50 s lever shot with a ~20 s flat tail at 7.8-6.8 bar was 3.78 s, and its eight
+fragments overlapped the scale-flat window for at most 2.25 s. At 2.5 s, 2 of the
+16 shots contained a usable region; at 2.0 s the two newest lever shots are both
+accepted and disagree by 3.6%, still inside the 10% gate. The stability
+requirement is enforced by the slope limits above, which reject transient regions
+inside any window; the window length only governs how much noise is averaged out.
+Regions shorter than 2.0 s remain rejected.
 
 ---
 
@@ -1771,7 +1799,7 @@ Pure estimator tests must cover:
 18. machine timestamp reversal;
 19. machine gap >500 ms splits interval;
 20. scale gap >1000 ms splits interval;
-21. overlap shorter than 2.5 seconds rejected;
+21. overlap shorter than 2.0 seconds rejected;
 22. multiple disjoint simultaneous-flat regions all contribute;
 23. transition region between two flat regions does not contribute;
 24. machine-flow interpolation at interval boundary;
@@ -1848,7 +1876,7 @@ Integration tests must verify:
 9. no fallback history search;
 10. one history item => no calibration;
 11. invalid first item + valid second => no shot #3;
-12. same title but different exact profile => rejection;
+12. same title but different extraction program => rejection;
 13. different DE1 serial => rejection;
 14. non-captured provenance => rejection;
 15. missing historical multiplier => rejection;
@@ -1922,10 +1950,12 @@ No calibration may cross machine identity or be inferred without gravimetric evi
 The current implementation must use:
 
 ```text
-profileTitle + exact local profile comparison
+profileTitle + local extraction-program comparison
 ```
 
 because history does not yet expose a directly queryable canonical profile identity.
+
+Tracked upstream as decentespresso/decaid#995.
 
 A future Decaid improvement should expose a stable content-derived profile ID and allow:
 
@@ -1944,6 +1974,6 @@ Until that exists, do not compensate by scanning deeper history.
 
 A calibration decision in v1 must always be explainable as:
 
-> The active machine was explicitly identified as this DE1. The two newest history entries returned for this exact profile were both captured on this same DE1 under known historical flow multipliers. Both shots contained genuine scale data. Within each shot, only continuous periods where pressure, DE1 flow and scale-derived weight flow were simultaneously stable were analysed. Transition regions and scaleless regions were ignored. After undoing each shot's historical flow multiplier, the gravimetric weight increase across those stable regions produced two compatible multiplier estimates. Their arithmetic mean produced the profile estimate, and a bounded damped correction was applied while the same DE1 and profile were still active.
+> The active machine was explicitly identified as this DE1. The two newest history entries returned for this exact profile program were both captured on this same DE1 under known historical flow multipliers. Both shots contained genuine scale data. Within each shot, only continuous periods where pressure, DE1 flow and scale-derived weight flow were simultaneously stable were analysed. Transition regions and scaleless regions were ignored. After undoing each shot's historical flow multiplier, the gravimetric weight increase across those stable regions produced two compatible multiplier estimates. Their arithmetic mean produced the profile estimate, and a bounded damped correction was applied while the same DE1 and profile were still active.
 
 If that statement cannot be made truthfully, the plugin does not derive or apply a new flow calibration.

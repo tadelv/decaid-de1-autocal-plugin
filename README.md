@@ -2,7 +2,7 @@
 
 Automatically adjusts a connected DE1's flow-estimation multiplier when the
 active espresso profile changes, using only gravimetric evidence from the two
-most recent shots recorded for that exact profile.
+most recent shots recorded for that profile program.
 
 The plugin is the calibration policy layer. Decaid keeps ownership of workflow
 lifecycle events, shot persistence, machine identity, measurement capture and
@@ -15,8 +15,9 @@ On a workflow change (or after new history appears), the plugin:
 1. Requires an eligible traditional DE1 (`DE1`, `DE1Plus`, `DE1Pro`, `DE1XL`,
    `DE1Cafe`, `DE1XXL`, `DE1XXXL`) with a usable serial number — never Bengle.
 2. Reads the two newest shots whose profile title matches the active profile,
-   and requires both to be the exact same serialized profile, captured on the
-   same machine, with a usable recorded flow multiplier and scale data.
+   and requires both to be the same extraction program (profile `version` and
+   `steps`), captured on the same machine, with a usable recorded flow
+   multiplier and scale data.
 3. Finds the periods inside each shot where pressure, DE1 flow and scale weight
    flow are *all* simultaneously flat and continuous, and discards the rest.
 4. Undoes each shot's historical multiplier, integrates the normalized machine

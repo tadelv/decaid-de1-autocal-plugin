@@ -125,7 +125,7 @@ test('rejects every required minimum and flatness violation', () => {
 
 test('rejects timestamp reversal and gaps that break continuity', () => {
   expectRejected({ machineTimes: [0, 0.5, 0.2, 0.7, 1.2, 1.7, 2.2, 2.7] }, 'insufficient_stable_region');
-  expectRejected({ machineTimes: [0, 0.5, 1, 1.6, 2.1, 2.6, 3.1, 3.6] }, 'insufficient_stable_region');
+  expectRejected({ machineTimes: [0, 0.5, 1, 1.6, 2.1, 2.6, 3.1] }, 'insufficient_stable_region');
   expectRejected({
     machineTimes: Array.from({ length: 9 }, (_, i) => i * 0.5),
     scaleTimes: [0, 0.5, 1, 2.1, 2.6, 3.1, 3.6, 4],
@@ -134,13 +134,15 @@ test('rejects timestamp reversal and gaps that break continuity', () => {
 
 test('rejects an overlap shorter than the minimum region', () => {
   expectRejected({
-    machineTimes: Array.from({ length: 5 }, (_, i) => i * 0.5),
-    scaleTimes: Array.from({ length: 5 }, (_, i) => i * 0.5),
+    machineTimes: Array.from({ length: 4 }, (_, i) => i * 0.5),
+    scaleTimes: Array.from({ length: 4 }, (_, i) => i * 0.5),
   }, 'insufficient_stable_region');
 
+  // 2.0 s is the revised minimum simultaneous-flat region (design revision
+  // 2026-10-14), so a 2.0 s overlap is the shortest accepted one.
   const exactlyMinimum = makeShot({
-    machineTimes: Array.from({ length: 6 }, (_, i) => i * 0.5),
-    scaleTimes: Array.from({ length: 6 }, (_, i) => i * 0.5),
+    machineTimes: Array.from({ length: 5 }, (_, i) => i * 0.5),
+    scaleTimes: Array.from({ length: 5 }, (_, i) => i * 0.5),
   });
   assert.equal(estimator.estimateShot(exactlyMinimum).accepted, true);
 });

@@ -285,7 +285,7 @@ test('history and metadata failures stop before full-shot fetch or POST', async 
   const profile = { title: 'Profile', notes: 'current' };
   const cases = [
     ['one history item', { history: [{ id: 'a', workflow: stableShot('a', profile).workflow }] }, 'insufficient_history'],
-    ['different exact profile', { profile, shot1: stableShot('a', { title: 'Profile', notes: 'old' }), shot2: stableShot('b', profile) }, 'profile_mismatch'],
+    ['different profile program', { profile, shot1: stableShot('a', { title: 'Profile', notes: 'current', steps: [{ name: 'pour' }] }), shot2: stableShot('b', profile) }, 'profile_mismatch'],
     ['different serial', { shotOptions1: { serial: 'other' } }, 'different_machine'],
     ['uncaptured provenance', { shotOptions1: { provenanceStatus: 'inferred' } }, 'uncaptured_machine_provenance'],
     ['missing historical multiplier', { shotOptions1: { flowCalibration: null } }, 'missing_historical_multiplier'],
@@ -308,6 +308,19 @@ test('history and metadata failures stop before full-shot fetch or POST', async 
     assert.equal(url.searchParams.get('order'), 'desc', name);
     assert.equal(url.searchParams.get('profileTitle'), profile.title, name);
   }
+});
+
+test('profile identity is the extraction program, so per-shot targets and notes do not reject older shots', async () => {
+  const profile = { version: '2', title: 'Profile', notes: 'current', target_weight: 40, steps: [{ name: 'pour' }] };
+  const olderShot = { version: '2', title: 'Profile', notes: 'old', target_weight: 36, steps: [{ name: 'pour' }] };
+  const accepted = await validRun({ profile, shot1: stableShot('older', olderShot) });
+  assert.equal(accepted.postCalls().length, 1);
+  assert.match(accepted.logs.at(-1), /action=apply/);
+
+  // A different extraction program is still a different profile.
+  const rejected = await validRun({ profile, shot1: stableShot('other', { ...profile, steps: [{ name: 'ramp' }] }) });
+  assert.equal(rejected.postCalls().length, 0);
+  assert.match(rejected.logs.at(-1), /reason=profile_mismatch/);
 });
 
 test('an unusable newest record never triggers a search for an older shot', async () => {

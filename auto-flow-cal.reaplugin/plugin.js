@@ -18,7 +18,7 @@ function createPlugin(host) {
   var MAX_WEIGHT_FLOW_SLOPE = 0.35;
   var MAX_MACHINE_GAP = 0.5;
   var MAX_SCALE_GAP = 1.0;
-  var MIN_REGION_DURATION = 2.5;
+  var MIN_REGION_DURATION = 2.0;
   var AGREEMENT_LIMIT = 0.10;
   var DEADBAND = 0.01;
   var RESOLUTION = 0.001;
@@ -91,6 +91,13 @@ function createPlugin(host) {
       }).join(",") + "}";
     }
     return JSON.stringify(value);
+  }
+
+  // Evidence identity is the extraction program, not the whole profile record:
+  // per-shot targets and descriptive fields never enter the flow estimate.
+  function profileIdentity(profile) {
+    var source = profile && typeof profile === "object" ? profile : {};
+    return canonicalize({ title: source.title, version: source.version, steps: source.steps });
   }
 
   function timestampSeconds(value) {
@@ -466,7 +473,7 @@ function createPlugin(host) {
     if (!shot || !shot.workflow || !shot.workflow.machine) return "profile_mismatch";
     var workflow = shot.workflow;
     var machine = workflow.machine;
-    if (canonicalize(workflow.profile) !== profileCanonical) return "profile_mismatch";
+    if (profileIdentity(workflow.profile) !== profileCanonical) return "profile_mismatch";
     if (machine.provenanceStatus !== "captured") return "uncaptured_machine_provenance";
     if (!isAllowedModel(machine.model) || machine.serialNumber !== serial) return "different_machine";
     if (!positive(machine.flowCalibration)) return "missing_historical_multiplier";
@@ -780,7 +787,7 @@ function createPlugin(host) {
   async function evaluate(workflow) {
     var context = {
       generation: ++state.generation,
-      profileCanonical: canonicalize(workflow && workflow.profile),
+      profileCanonical: profileIdentity(workflow && workflow.profile),
       historyRevision: state.historyRevision,
       evidenceRead: false
     };
@@ -803,7 +810,7 @@ function createPlugin(host) {
   }
 
   async function handleWorkflowUpdated(workflow) {
-    var profileCanonical = canonicalize(workflow && workflow.profile);
+    var profileCanonical = profileIdentity(workflow && workflow.profile);
     var changed = profileCanonical !== state.activeProfileCanonical;
     var dirty = state.historyRevision > state.lastEvaluatedHistoryRevision;
     if (!changed && !dirty) return;
