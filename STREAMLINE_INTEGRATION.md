@@ -24,10 +24,12 @@ Research note on `decentespresso/streamline-js` at `d28da12` (v0.2.17 plus the
   plugin stays the only writer and every safety rule (evidence, ownership,
   verification) still lives here.
 - This plugin now answers `GET /api/v1/plugins/auto-flow-cal.reaplugin/status`
-  (`schemaVersion: 1`, memory-only). That document is the natural source for a
-  `skin` answer: one function, two readers.
-- Smallest useful slice: a `tile-line` under **Brew** showing `×0.985 own`,
-  tap-to-open overlay page. Then the page itself. Then push.
+  (`schemaVersion: 1`, memory-only) and serves its record as a page from
+  `GET .../ui` (v1.4.0). That page is the integration that needs no skin work at
+  all: Streamline's Extensions screen gives it an **Open** button, and the same
+  HTML is already overlay-ready (`?embed=1&theme=…` → `streamline:ready|size|close`).
+- The remaining surfaces below are the dashboard-side additions; the smallest
+  useful one is a `tile-line` under **Brew** that opens the page as an overlay.
 
 ## What the plugin can already say
 
@@ -77,8 +79,8 @@ the machine off).
 
 | # | Surface | What it would show | Cost | Verdict |
 |---|---|---|---|---|
-| 1 | `tile-line` on `temperature` | `×0.985 own` under **Brew**, `active: true` while owned, `open` → record page | one `skin` handler, no new permission (already has `api`) | **build first** |
-| 2 | `ui` page (overlay, `fit`) | the whole record: profile, current/baseline/applied, ownership, last decision + reason, dry-run target, settings; optional "restore baseline" | inline HTML string in `plugin.js` (the plugin ships as one dependency-free file) | **build second** |
+| 1 | `tile-line` on `temperature` | `×0.985 own` under **Brew**, `active: true` while owned, `open` → the 1.4.0 page as an overlay | one `skin` handler, no new permission (already has `api`) | **next** |
+| 2 | `ui` page (overlay, `fit`) | the whole record: profile, current/baseline/applied, ownership, last decision + reason, dry-run target, settings; optional "restore baseline" | **done in 1.4.0**: inline HTML in `plugin.js`, no new permission, live reads | **built** |
 | 3 | `tile-hint` on `temperature` | last correction, e.g. `+0.05` (24 chars, pill under the value) | trivial | alternative to 1 if a pill reads better than a line |
 | 4 | `menu-item` on `shot-history` | "Flow calibration" → overlay with `?shotId=`, estimating *that* shot from its measurements (preview only, never a write) | needs a `ui` page that runs `estimateShot` on a fetched shot | later, high diagnostic value |
 | 5 | `menu-item` on `profile` | "Why no calibration?" — the last `skip` reason for this program | shows the *last* decision, not an arbitrary profile's, so it can mislead | later, with careful wording |
@@ -132,13 +134,16 @@ whole integration needs beyond `skin`/`ui`.
 
 ## Manifest and handler sketch
 
+`status` and `ui` are implemented in 1.4.0. The `skin` endpoint and the push
+socket below are the next step, not yet in the plugin:
+
 ```json
 {
   "permissions": ["log", "api", "emit", "pluginStorage", "events.workflow", "events.shots"],
   "api": [
     { "id": "status", "type": "http", "data": {} },
-    { "id": "skin", "type": "http", "data": {} },
     { "id": "ui", "type": "http", "data": {} },
+    { "id": "skin", "type": "http", "data": {} },
     { "id": "changed", "type": "websocket", "data": {} }
   ]
 }
@@ -147,15 +152,15 @@ whole integration needs beyond `skin`/`ui`.
 ```js
 __httpRequestHandler: function (request) {
   if (request.endpoint === "status") return jsonResponse(request, 200, statusDocument());
+  if (request.endpoint === "ui") return servePage(request);
   if (request.endpoint === "skin") {
     var doc = statusDocument();
     return jsonResponse(request, 200, {
       version: 1,
-      surfaces: [calibrationLine(doc), historyMenuItem(doc)],
+      surfaces: [calibrationLine(doc)],
       live: { endpoint: "changed" }
     });
   }
-  if (request.endpoint === "ui") return recordPage(request);
   return jsonResponse(request, 404, { error: "not_found" });
 }
 ```

@@ -79,6 +79,10 @@ function createHarness({
   settings,
   history = [],
   fullShots = [],
+  workflow = {
+    profile: { title: 'Profile' },
+    context: { targetDoseWeight: 18, targetYield: 36, grinderSetting: '6.4' },
+  },
   fetchHook,
 } = {}) {
   const calls = [];
@@ -119,6 +123,9 @@ function createHarness({
     }
     if (requestPath === '/api/v1/machine/state') {
       return response(machineSnapshot(iso(0), { state: 'idle', substate: 'idle' }, 0, 0));
+    }
+    if (requestPath === '/api/v1/workflow') {
+      return response(workflow);
     }
     if (requestPath === '/api/v1/shots') {
       if (parsed.searchParams.has('ids')) return response(fullShots);
@@ -162,6 +169,7 @@ async function validRun(options = {}) {
     machine: options.machine,
     stored: options.stored,
     settings: options.settings,
+    workflow: options.workflow,
     history: [
       { id: shot1.id, workflow: shot1.workflow },
       { id: shot2.id, workflow: shot2.workflow },
@@ -731,6 +739,125 @@ test('only the declared status endpoint is answered; anything else is a 404', as
     requestId: 'r5', endpoint: 'status', method: 'POST', headers: {}, body: { anything: true }, query: { raw: '1' },
   });
   assert.equal(ignored.status, 200, 'the status read is safe to call with any method, body or query');
+});
+
+// The `ui` page is what Streamline's Extensions screen opens (and can frame as
+// an overlay). It reads the workflow, the machine calibration and the newest
+// shot of the active profile, and writes nothing.
+async function page(harness, query = {}, headers = { Origin: 'http://localhost:24803' }) {
+  const res = await harness.plugin.__httpRequestHandler({
+    requestId: 'p1', endpoint: 'ui', method: 'GET', headers, body: null, query,
+  });
+  assert.equal(res.requestId, 'p1');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['Content-Type'], 'text/html; charset=utf-8');
+  return res;
+}
+
+function shotSummary({ id, flowCalibration, profile, context, annotations, timestamp }) {
+  return {
+    id,
+    timestamp: timestamp || '2026-10-20T10:00:00.000Z',
+    workflow: {
+      profile: profile || { title: 'Profile' },
+      context: context || { targetDoseWeight: 18, targetYield: 36, grinderSetting: '6.4' },
+      machine: { model: 'DE1Pro', serialNumber: '12345', flowCalibration },
+    },
+    annotations: annotations || { actualDoseWeight: 18.1, actualYield: 36.2 },
+  };
+}
+
+async function startedHarness(options = {}) {
+  const harness = createHarness(options);
+  await harness.start(options.settings);
+  const profile = options.workflow && options.workflow.profile ? options.workflow.profile : { title: 'Profile' };
+  await harness.workflow(profile);
+  return harness;
+}
+
+test('the page shows the live multiplier and the newest shot of the active profile', async () => {
+  const harness = await startedHarness({
+    current: 0.8,
+    history: [shotSummary({ id: 's9', flowCalibration: 0.75 })],
+  });
+  const before = harness.fetchCalls().length;
+  const postsBefore = harness.postCalls().length;
+  const res = await page(harness);
+  const html = res.body;
+
+  assert.equal(harness.postCalls().length, postsBefore, 'opening the page never writes');
+  assert.ok(harness.fetchCalls().length > before, 'the page reads the live state');
+  assert.match(html, /current flow calibration/);
+  assert.match(html, /\u00d70\.800/, 'the live machine multiplier');
+  assert.match(html, /#s9/);
+  assert.match(html, /18\.1 g/);
+  assert.match(html, /36\.2 g/);
+  assert.match(html, /\u00d70\.750/, "the multiplier that shot was pulled at");
+  assert.match(html, /same as the current profile/);
+  assert.match(html, /6\.4/);
+  assert.match(html, /last evaluation|Last decision/i);
+  assert.equal(res.headers['Content-Security-Policy'], "frame-ancestors 'self' http://localhost:24803");
+});
+
+test('the page escapes everything it prints', async () => {
+  const hostile = '<img src=x onerror="alert(1)">';
+  const harness = await startedHarness({
+    workflow: { profile: { title: hostile }, context: {} },
+    history: [shotSummary({ id: 's9', flowCalibration: 0.9, profile: { title: hostile } })],
+  });
+  const html = (await page(harness)).body;
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
+});
+
+test('the page says so when the profile has no shot yet', async () => {
+  const harness = await startedHarness({ current: 0.8, history: [] });
+  const html = (await page(harness)).body;
+  assert.match(html, /No shot recorded for this profile yet/);
+  assert.match(html, /\u00d70\.800/, 'the multiplier is still shown');
+});
+
+test('a shot from a different extraction program is labelled as such', async () => {
+  const harness = await startedHarness({
+    workflow: { profile: { title: 'Profile', steps: [{ name: 'pour' }] }, context: {} },
+    history: [shotSummary({ id: 's9', flowCalibration: 0.9, profile: { title: 'Profile', steps: [{ name: 'other' }] } })],
+  });
+  const html = (await page(harness)).body;
+  assert.match(html, /differs from the current profile/);
+});
+
+test('the page still renders when Decaid cannot be read', async () => {
+  const harness = createHarness({
+    fetchHook: ({ url }) => {
+      const requestPath = new URL(url).pathname;
+      if (requestPath === '/api/v1/workflow' || requestPath === '/api/v1/machine/calibration') {
+        return response({}, 500);
+      }
+    },
+  });
+  await harness.start();
+  const html = (await page(harness)).body;
+  assert.match(html, /Could not read workflow and calibration from Decaid/);
+  assert.match(html, /current flow calibration/);
+});
+
+test('the page is ready to be framed as a Streamline overlay', async () => {
+  const harness = await startedHarness({ history: [] });
+  const html = (await page(harness, { embed: '1', theme: 'dark' })).body;
+  assert.match(html, /<body class="embed">/);
+  assert.match(html, /data-theme="dark"/);
+  assert.match(html, /streamline:ready/);
+  assert.match(html, /streamline:size/);
+  assert.match(html, /streamline:close/);
+  assert.match(html, /returnTo/, 'page mode can go back to the skin');
+});
+
+test('opening the page does not evaluate or change the reported state', async () => {
+  const harness = await validRun({ shotOptions1: { noScale: true } });
+  const first = JSON.parse((await harness.plugin.__httpRequestHandler({ requestId: 'a', endpoint: 'status' })).body);
+  await page(harness);
+  const second = JSON.parse((await harness.plugin.__httpRequestHandler({ requestId: 'b', endpoint: 'status' })).body);
+  assert.deepEqual(second, first);
 });
 
 test('malformed persisted state is discarded instead of granting ownership', async () => {

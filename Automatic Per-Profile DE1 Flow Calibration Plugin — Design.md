@@ -1970,7 +1970,7 @@ Until that exists, do not compensate by scanning deeper history.
 
 ---
 
-# 39. Status endpoint (v1.3)
+# 39. Status endpoint and plugin page (v1.3, v1.4)
 
 The plugin declares one HTTP endpoint, `status`, in `api`. It answers from memory
 only — no Decaid API call, no storage write, no state change — so it works with the
@@ -1991,6 +1991,29 @@ Rules:
 - Any endpoint other than `status` is answered `404 {"error":"not_found"}`.
 - Adding fields must keep `schemaVersion` meaningful, because skins read it; see
   `STREAMLINE_INTEGRATION.md`.
+
+The plugin also declares a `ui` endpoint (v1.4) whose page is one live read and
+no write:
+
+- `GET /api/v1/machine/calibration` — the current flow calibration;
+- `GET /api/v1/workflow` — the active profile and context;
+- `GET /api/v1/shots?profileTitle=<title>&limit=1&order=desc` — the newest shot of
+  that profile, whose recorded `workflow.machine.flowCalibration` is the
+  multiplier it was actually pulled at, and whose profile program is compared
+  with the active one using the same `profileIdentity` the policy uses;
+- the plugin's own baseline/ownership record and last decision from
+  `statusDocument()`.
+
+Rules:
+
+- Every value is HTML-escaped; nothing from Decaid is trusted.
+- A failed Decaid read degrades to `—` plus a note naming what could not be read;
+  the page never fails to render.
+- `?embed=1` makes the page post `streamline:ready`, `streamline:size` and
+  `streamline:close` so Streamline can frame it as an overlay dialog; an explicit
+  `theme` is honoured, and `prefers-color-scheme` is only a fallback.
+- The page answers `Content-Security-Policy: frame-ancestors 'self' <Origin>` so a
+  skin on another origin may frame it, and `Cache-Control: no-store`.
 
 ---
 

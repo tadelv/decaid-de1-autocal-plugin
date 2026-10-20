@@ -118,6 +118,34 @@ curl -s http://localhost:8080/api/v1/plugins/auto-flow-cal.reaplugin/status
 The shape is versioned (`schemaVersion`) because skins read it: see
 [`STREAMLINE_INTEGRATION.md`](STREAMLINE_INTEGRATION.md).
 
+## Plugin page
+
+The manifest also declares `ui`, so Streamline's **Settings → Extensions** screen
+gives the plugin an **Open** button (it appends `returnTo`, which the page's back
+button uses). The page is a live read and never writes:
+
+- the current flow calibration (`GET /api/v1/machine/calibration`);
+- the active workflow's profile (`GET /api/v1/workflow`);
+- the newest recorded shot **of that profile**, with the multiplier it was pulled
+  at and whether it is the same extraction program as the active profile;
+- the plugin's baseline/ownership record and its last decision with the reason.
+
+With `?embed=1&theme=dark|light` the page posts `streamline:ready`,
+`streamline:size` and `streamline:close`, so the same page can be framed as a
+Streamline overlay dialog. `theme` is honoured explicitly and the page falls back
+to `prefers-color-scheme` only when it is absent. Decaid serves plugin pages with
+`X-Frame-Options: SAMEORIGIN`; the page answers
+`Content-Security-Policy: frame-ancestors 'self' <request Origin>`, so a skin on
+another origin can still frame it.
+
+```bash
+curl -s http://localhost:8080/api/v1/plugins/auto-flow-cal.reaplugin/ui
+curl -s 'http://localhost:8080/api/v1/plugins/auto-flow-cal.reaplugin/ui?embed=1&theme=dark'
+```
+
+If Decaid cannot be read, the rows that need it show `—` and the page says which
+calls failed; it never fails to render.
+
 ## Baseline and ownership
 
 DE1 flow calibration is machine-global, so the plugin remembers, per serial:

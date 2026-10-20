@@ -2,7 +2,7 @@ function createPlugin(host) {
   "use strict";
 
   var PLUGIN_ID = "auto-flow-cal.reaplugin";
-  var VERSION = "1.3.0";
+  var VERSION = "1.4.0";
   var API_BASE = "http://localhost:8080";
   var STORAGE_KEY = "state";
 
@@ -964,6 +964,257 @@ function createPlugin(host) {
     };
   }
 
+  function escapeHtml(value) {
+    return String(value === null || value === undefined ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function multiplierText(value) {
+    return positive(value) ? "\u00d7" + value.toFixed(3) : "\u2014";
+  }
+
+  function gramsText(value) {
+    return positive(value) ? (Math.round(value * 10) / 10) + " g" : "\u2014";
+  }
+
+  function valueText(value) {
+    return value === null || value === undefined || value === "" ? "\u2014" : String(value);
+  }
+
+  function whenText(value) {
+    if (value === null || value === undefined || value === "") return "\u2014";
+    var escaped = escapeHtml(value);
+    return '<time datetime="' + escaped + '" data-iso="' + escaped + '">' + escaped + "</time>";
+  }
+
+  // `value` is already-escaped HTML built by the helpers above; labels are escaped here.
+  function pageRow(label, value) {
+    return "<div><dt>" + escapeHtml(label) + "</dt><dd>" + value + "</dd></div>";
+  }
+
+  function frameAncestors(request) {
+    var headers = request && request.headers && typeof request.headers === "object" ? request.headers : {};
+    var source = "";
+    for (var key in headers) {
+      if (!hasOwn(headers, key)) continue;
+      var name = key.toLowerCase();
+      var value = headers[key];
+      if (Array.isArray(value)) value = value[0];
+      if (name === "origin") source = String(value === undefined ? "" : value);
+      else if (name === "referer" && source === "") source = String(value === undefined ? "" : value);
+    }
+    var match = source.match(/^(https?:\/\/[A-Za-z0-9.\-\[\]:]+)(?:\/|$)/);
+    return "frame-ancestors 'self'" + (match ? " " + match[1] : "");
+  }
+
+  // The page is a live read: the workflow, the machine's calibration and the
+  // newest recorded shot for that profile. Nothing is written and no evaluation
+  // is triggered, so an open page cannot change calibration.
+  async function collectPageData() {
+    var page = { workflow: null, calibration: null, shot: null, programMatches: false, failures: {} };
+
+    try {
+      page.workflow = await apiGet("/api/v1/workflow");
+    } catch (error) {
+      page.failures.workflow = true;
+    }
+
+    try {
+      var calibration = await apiGet("/api/v1/machine/calibration");
+      if (calibration && positive(calibration.flowMultiplier)) page.calibration = calibration.flowMultiplier;
+      else page.failures.calibration = true;
+    } catch (error) {
+      page.failures.calibration = true;
+    }
+
+    var profile = page.workflow && page.workflow.profile ? page.workflow.profile : null;
+    var title = profile && profile.title;
+    if (title !== undefined && title !== null) {
+      try {
+        var list = await apiGet("/api/v1/shots?profileTitle=" + encodeURIComponent(title) + "&limit=1&offset=0&order=desc");
+        var items = Array.isArray(list) ? list : (list && Array.isArray(list.items) ? list.items : null);
+        if (items === null) {
+          page.failures.shots = true;
+        } else if (items.length > 0) {
+          page.shot = items[0];
+          page.programMatches = profileIdentity(page.shot.workflow && page.shot.workflow.profile) === profileIdentity(profile);
+        }
+      } catch (error) {
+        page.failures.shots = true;
+      }
+    }
+
+    return page;
+  }
+
+  var PAGE_STYLE = [
+    ":root{--bg:#eef0f4;--card:#fff;--text:#171a1f;--muted:#69707d;--line:#e3e6eb;--accent:#2f7de1;--pill:#eceff5}",
+    'html[data-theme="dark"]{--bg:#14161b;--card:#1c1f26;--text:#eceef2;--muted:#9aa1ad;--line:#2a2f38;--accent:#5b9bf0;--pill:#262b34}',
+    "*{box-sizing:border-box}",
+    "body{margin:0;padding:24px 16px;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}",
+    "body.embed{background:transparent;padding:0}",
+    ".card{position:relative;width:100%;max-width:420px;margin:24px auto;padding:18px 20px 16px;border-radius:16px;background:var(--card);border:1px solid var(--line);box-shadow:0 10px 28px rgba(0,0,0,.10)}",
+    "body.embed .card{margin:0 auto}",
+    "header{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;padding-right:28px}",
+    "h1{margin:0;font-size:15px;font-weight:600}",
+    ".meta{color:var(--muted);font-size:12px}",
+    ".pill{margin-left:auto;padding:2px 8px;border-radius:999px;background:var(--pill);color:var(--accent);font-size:11px;font-weight:600;letter-spacing:.02em;text-transform:uppercase}",
+    ".cal{margin:16px 0 14px;display:flex;align-items:baseline;gap:10px}",
+    ".cal .mult{font-size:34px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}",
+    ".cal .cap{color:var(--muted);font-size:12px}",
+    "h2{margin:18px 0 8px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}",
+    "dl{margin:0;display:grid;gap:6px}",
+    "dl>div{display:grid;grid-template-columns:auto minmax(0,1fr);gap:12px;align-items:baseline;min-width:0}",
+    "dt{color:var(--muted);font-size:12.5px}",
+    "dd{margin:0;text-align:right;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}",
+    ".empty{margin:0;color:var(--muted);font-size:13px}",
+    ".note{margin:10px 0 0;color:var(--muted);font-size:12px}",
+    "#close{position:absolute;top:10px;right:10px;width:28px;height:28px;border:0;border-radius:8px;background:transparent;color:var(--muted);font-size:18px;line-height:1;cursor:pointer}",
+    "#close:hover{background:var(--pill);color:var(--text)}",
+    "#close[hidden]{display:none}",
+    "#close:focus-visible{outline:2px solid var(--accent);outline-offset:1px}",
+  ].join("");
+
+  function shotSection(page) {
+    if (!page.shot) {
+      var empty = page.failures.shots
+        ? "Could not read the shot history."
+        : "No shot recorded for this profile yet.";
+      return '<p class="empty">' + empty + "</p>" +
+        '<p class="note">Calibration needs the two newest shots of this profile, each with a stable period where pressure, machine flow and scale flow are all flat.</p>';
+    }
+    var shot = page.shot;
+    var workflow = shot.workflow && typeof shot.workflow === "object" ? shot.workflow : {};
+    var machine = workflow.machine && typeof workflow.machine === "object" ? workflow.machine : {};
+    var context = workflow.context && typeof workflow.context === "object" ? workflow.context : {};
+    var annotations = shot.annotations && typeof shot.annotations === "object" ? shot.annotations : {};
+    var dose = annotations.actualDoseWeight !== undefined ? annotations.actualDoseWeight : context.targetDoseWeight;
+    var yieldWeight = annotations.actualYield !== undefined ? annotations.actualYield : context.targetYield;
+    var targetOnly = annotations.actualDoseWeight === undefined && annotations.actualYield === undefined;
+    var identity = [machine.model, machine.serialNumber].filter(function (part) { return !!part; }).join(" ");
+    // Decaid shot ids are UUIDs; the card shows a short form and keeps the whole
+    // id in the tooltip.
+    var shotId = valueText(shot.id);
+    var shownId = shotId.length > 8 ? shotId.slice(0, 8) : shotId;
+    return "<dl>" +
+      pageRow("When", whenText(shot.timestamp !== undefined ? shot.timestamp : shot.createdAt)) +
+      pageRow("Shot", '<span title="' + escapeHtml(shotId) + '">#' + escapeHtml(shownId) + "</span>") +
+      pageRow("Dose \u2192 yield", gramsText(dose) + " \u2192 " + gramsText(yieldWeight) + (targetOnly ? " (targets)" : "")) +
+      pageRow("Grind", escapeHtml(valueText(context.grinderSetting))) +
+      pageRow("Pulled at", multiplierText(machine.flowCalibration) +
+        (identity ? " \u00b7 " + escapeHtml(identity) : "")) +
+      pageRow("Program", page.programMatches
+        ? "same as the current profile"
+        : "differs from the current profile") +
+      "</dl>";
+  }
+
+  function decisionSection(status) {
+    var decision = status.evaluation.lastDecision;
+    if (!decision) return '<p class="empty">No evaluation has run yet.</p>';
+    var label = valueText(decision.action) + (decision.reason ? " \u00b7 " + valueText(decision.reason) : "");
+    var rows = pageRow("Decision", escapeHtml(label)) +
+      pageRow("At", whenText(status.evaluation.lastEvaluatedAt));
+    if (decision.estimate !== undefined) rows += pageRow("Estimate", escapeHtml(valueText(decision.estimate)));
+    if (decision.current !== undefined) rows += pageRow("Machine at", escapeHtml(valueText(decision.current)));
+    if (decision.target !== undefined) rows += pageRow("Target", escapeHtml(valueText(decision.target)));
+    var pending = status.evaluation.historyRevision > status.evaluation.lastEvaluatedHistoryRevision;
+    return "<dl>" + rows + "</dl>" +
+      (pending ? '<p class="note">A shot has been stored since this decision; the next profile change evaluates it.</p>' : "");
+  }
+
+  var PAGE_SCRIPT = [
+    "<script>",
+    "(function () {",
+    "  var root = document.documentElement;",
+    '  if (!root.getAttribute("data-theme") && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) root.setAttribute("data-theme", "dark");',
+    '  var times = document.querySelectorAll("time[data-iso]");',
+    "  for (var i = 0; i < times.length; i++) {",
+    '    var when = new Date(times[i].getAttribute("data-iso"));',
+    "    if (!isNaN(when.getTime())) times[i].textContent = when.toLocaleString();",
+    "  }",
+    '  var params = new URLSearchParams(location.search);',
+    '  var embed = params.get("embed") === "1" && window.parent !== window;',
+    '  var close = document.getElementById("close");',
+    "  if (embed) {",
+    '    var post = function (message) { window.parent.postMessage(message, "*"); };',
+    "    var size = function () {",
+    '      var rect = document.getElementById("card").getBoundingClientRect();',
+    '      post({ type: "streamline:size", width: Math.ceil(rect.width), height: Math.ceil(rect.height) });',
+    "    };",
+    '    close.addEventListener("click", function () { post({ type: "streamline:close" }); });',
+    '    post({ type: "streamline:ready" });',
+    "    size();",
+    '    window.addEventListener("resize", size);',
+    "  } else {",
+    '    var back = params.get("returnTo");',
+    '    if (back && /^https?:\\/\\/[^@\\s]+$/i.test(back)) { close.addEventListener("click", function () { location.href = back; }); }',
+    "    else close.hidden = true;",
+    "  }",
+    "})();",
+    "</script>",
+  ].join("\n");
+
+  function renderPage(page, options) {
+    var status = statusDocument();
+    var record = status.machine.calibration;
+    var profile = page.workflow && page.workflow.profile ? page.workflow.profile : {};
+    var current = page.calibration !== null ? page.calibration : status.machine.currentMultiplier;
+    var title = profile.title === undefined || profile.title === null ? "\u2014" : String(profile.title);
+
+    var recordRows = pageRow("Profile", escapeHtml(title)) +
+      pageRow("Plugin baseline", record ? escapeHtml(multiplierText(record.baselineMultiplier)) : "\u2014") +
+      pageRow("Applied by plugin", record ? escapeHtml(multiplierText(record.lastPluginAppliedMultiplier)) : "\u2014") +
+      pageRow("Owns current value", record ? (record.ownsCurrentMultiplier ? "yes" : "no") : "\u2014");
+    if (status.machine.serial !== null) {
+      recordRows += pageRow("Machine", escapeHtml(valueText(status.machine.model) + " " + valueText(status.machine.serial)));
+    }
+
+    var failures = [];
+    if (page.failures.workflow) failures.push("workflow");
+    if (page.failures.calibration) failures.push("calibration");
+
+    return "<!doctype html><html lang=\"en\"" + (options.theme ? ' data-theme="' + options.theme + '"' : "") + "><head>" +
+      '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">' +
+      "<title>Auto flow calibration</title><style>" + PAGE_STYLE + "</style></head>" +
+      '<body class="' + (options.embed ? "embed" : "page") + '">' +
+      '<div class="card" id="card">' +
+      "<header><h1>Auto flow calibration</h1>" +
+      '<span class="meta">v' + escapeHtml(VERSION) + "</span>" +
+      (status.plugin.dryRun ? '<span class="pill">dry run</span>' : "") +
+      '<button id="close" type="button" aria-label="Close">\u00d7</button></header>' +
+      '<section class="cal"><span class="mult">' + multiplierText(current) + "</span>" +
+      '<span class="cap">current flow calibration</span></section>' +
+      "<dl>" + recordRows + "</dl>" +
+      "<h2>Last shot of this profile</h2>" + shotSection(page) +
+      "<h2>Last decision</h2>" + decisionSection(status) +
+      (failures.length > 0 ? '<p class="note">Could not read ' + escapeHtml(failures.join(" and ")) + " from Decaid." : "") +
+      "</div>" + PAGE_SCRIPT + "</body></html>";
+  }
+
+
+  async function servePage(request) {
+    var query = request && request.query && typeof request.query === "object" ? request.query : {};
+    var page = await collectPageData();
+    return {
+      requestId: request ? request.requestId : undefined,
+      status: 200,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": frameAncestors(request)
+      },
+      body: renderPage(page, {
+        theme: query.theme === "dark" ? "dark" : (query.theme === "light" ? "light" : ""),
+        embed: query.embed === "1"
+      })
+    };
+  }
+
   return {
     id: PLUGIN_ID,
     version: VERSION,
@@ -971,13 +1222,12 @@ function createPlugin(host) {
     onUnload: onUnload,
     onEvent: onEvent,
     // Decaid serves GET /api/v1/plugins/{id}/{endpoint} for every endpoint the
-    // manifest declares as http. `status` is declared there; anything else is
-    // not ours to answer.
+    // manifest declares as http. `status` is the plugin's state, `ui` is the
+    // page Streamline's Extensions screen opens (and can frame as an overlay).
     __httpRequestHandler: function (request) {
-      if (!request || request.endpoint !== "status") {
-        return jsonResponse(request, 404, { error: "not_found" });
-      }
-      return jsonResponse(request, 200, statusDocument());
+      if (request && request.endpoint === "status") return jsonResponse(request, 200, statusDocument());
+      if (request && request.endpoint === "ui") return servePage(request);
+      return jsonResponse(request, 404, { error: "not_found" });
     },
     __test: {
       canonicalize: canonicalize,
