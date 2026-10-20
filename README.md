@@ -35,6 +35,8 @@ baseline restoration.
 
 ## Install
 
+[Install using Decaid directly](https://decentespresso.com/docs/how_to_install_skins_or_plugins_on_decaid)
+
 Requires a Decaid build whose plugin host exposes `events.workflow`,
 `events.shots`, `api` and `pluginStorage` (permissions are declared in the
 manifest).
