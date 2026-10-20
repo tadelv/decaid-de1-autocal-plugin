@@ -186,6 +186,23 @@ npm test    # manifest, estimator and plugin conformance suite (node --test, no 
 npm run check
 ```
 
+### Why did a profile not calibrate?
+
+`tools/why-skip.js` reads the newest shots of a profile from a running Decaid,
+asks the plugin's own estimator for the verdict, and then shows which threshold
+threw the evidence away: how many flat edges each check rejected, the longest
+flat region per side, the overlap it produced against the 2.0 s minimum, and
+whether lowering `MIN_PRESSURE` would change the outcome. The thresholds are
+read out of `plugin.js`, so the report cannot drift from the code it explains.
+
+```bash
+node tools/why-skip.js --decaid http://<decaid>:8080                      # active profile
+node tools/why-skip.js --decaid http://<decaid>:8080 --profile "Baseline ULC" --limit 3
+node tools/why-skip.js --decaid http://<decaid>:8080 --json > evidence.json
+```
+
+It is read-only: three `GET`s, no writes, nothing persisted.
+
 The tests load the production `plugin.js` into a `node:vm` sandbox with a mocked
 host and `fetch`, and the fixtures mirror Decaid's real serialization (paginated
 `{items,...}` history envelope, nested machine state, ISO-8601 timestamps), so
