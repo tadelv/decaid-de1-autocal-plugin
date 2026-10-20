@@ -1970,7 +1970,31 @@ Until that exists, do not compensate by scanning deeper history.
 
 ---
 
-# 39. Implementation principle
+# 39. Status endpoint (v1.3)
+
+The plugin declares one HTTP endpoint, `status`, in `api`. It answers from memory
+only — no Decaid API call, no storage write, no state change — so it works with the
+machine switched off and cannot race an evaluation.
+
+`statusDocument()` in `plugin.js` is the single builder; the document carries
+`schemaVersion: 1`, `plugin` (id, version, enabled, dryRun, storageReady),
+`settings`, `profile.activeTitle`, `machine` (serial, model, `currentMultiplier` as
+last read, and the baseline/ownership `calibration` record), `machines` (every
+remembered serial), and `evaluation` (history revision, last evaluated revision,
+last evaluated timestamp, last structured decision).
+
+Rules:
+
+- The document reports what the last evaluation saw, never a live read.
+- A machine that stops being an eligible DE1 is forgotten, so no stale serial or
+  calibration is reported for it.
+- Any endpoint other than `status` is answered `404 {"error":"not_found"}`.
+- Adding fields must keep `schemaVersion` meaningful, because skins read it; see
+  `STREAMLINE_INTEGRATION.md`.
+
+---
+
+# 40. Implementation principle
 
 A calibration decision in v1 must always be explainable as:
 

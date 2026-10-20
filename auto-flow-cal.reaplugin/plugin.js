@@ -2,7 +2,7 @@ function createPlugin(host) {
   "use strict";
 
   var PLUGIN_ID = "auto-flow-cal.reaplugin";
-  var VERSION = "1.2.0";
+  var VERSION = "1.3.0";
   var API_BASE = "http://localhost:8080";
   var STORAGE_KEY = "state";
 
@@ -31,7 +31,12 @@ function createPlugin(host) {
     generation: 0,
     historyRevision: 0,
     lastEvaluatedHistoryRevision: -1,
-    pendingWorkflow: null
+    pendingWorkflow: null,
+    activeSerial: null,
+    activeModel: null,
+    lastSeenMultiplier: null,
+    lastDecision: null,
+    lastEvaluatedAt: null
   };
 
   var settings = {
@@ -538,6 +543,14 @@ function createPlugin(host) {
     return { ok: true, verified: verified.flowMultiplier };
   }
 
+  // The machine this plugin had been tracking is gone (Bengle attached, or no
+  // usable identity), so a status read must not keep reporting its calibration.
+  function forgetMachine() {
+    state.activeSerial = null;
+    state.activeModel = null;
+    state.lastSeenMultiplier = null;
+  }
+
   function currentGeneration(context) {
     return context.generation === state.generation && context.profileCanonical === state.activeProfileCanonical;
   }
@@ -570,8 +583,16 @@ function createPlugin(host) {
     }
 
     var serial = eligibleSerial(machineInfo);
-    if (!isAllowedModel(machineInfo && machineInfo.model)) return baseDecision(title, "skip", "non_de1_machine");
-    if (!serial) return baseDecision(title, "skip", "machine_identity_unavailable");
+    if (!isAllowedModel(machineInfo && machineInfo.model)) {
+      forgetMachine();
+      return baseDecision(title, "skip", "non_de1_machine");
+    }
+    if (!serial) {
+      forgetMachine();
+      return baseDecision(title, "skip", "machine_identity_unavailable");
+    }
+    state.activeSerial = serial;
+    state.activeModel = machineInfo.model;
 
     var calibration;
     try {
@@ -581,6 +602,7 @@ function createPlugin(host) {
     }
     var currentMultiplier = calibration && calibration.flowMultiplier;
     if (!positive(currentMultiplier)) return baseDecision(title, "skip", "calibration_read_failed");
+    state.lastSeenMultiplier = currentMultiplier;
 
     var record = machineRecord(serial);
     if (record.ownsCurrentMultiplier && positive(record.lastPluginAppliedMultiplier) &&
@@ -806,6 +828,8 @@ function createPlugin(host) {
     if (context.evidenceRead && context.generation === state.generation && context.profileCanonical === state.activeProfileCanonical) {
       state.lastEvaluatedHistoryRevision = context.historyRevision;
     }
+    state.lastDecision = result;
+    state.lastEvaluatedAt = new Date().toISOString();
     logDecision(result || baseDecision(title, "skip", "history_fetch_failed"));
   }
 
@@ -870,12 +894,91 @@ function createPlugin(host) {
     if (state.storageReady) await savePersistentState();
   }
 
+  function jsonResponse(request, status, body) {
+    return {
+      requestId: request ? request.requestId : undefined,
+      status: status,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    };
+  }
+
+  function statusNumber(value) {
+    return positive(value) ? Math.round(value * 1000) / 1000 : null;
+  }
+
+  function machineStatus(record) {
+    if (!record || typeof record !== "object") return null;
+    return {
+      baselineMultiplier: statusNumber(record.baselineMultiplier),
+      lastPluginAppliedMultiplier: statusNumber(record.lastPluginAppliedMultiplier),
+      ownsCurrentMultiplier: record.ownsCurrentMultiplier === true
+    };
+  }
+
+  // `/status` answers from memory only: no Decaid API call, no storage write and
+  // no state change, so it works with the machine switched off and can never
+  // race an evaluation. Everything it reports is what the last evaluation saw.
+  function statusDocument() {
+    var machines = {};
+    var serials = Object.keys(persistentState.machines);
+    for (var i = 0; i < serials.length; i++) {
+      machines[serials[i]] = machineStatus(persistentState.machines[serials[i]]);
+    }
+    var active = state.activeSerial === null ? null : persistentState.machines[state.activeSerial];
+    return {
+      schemaVersion: 1,
+      plugin: {
+        id: PLUGIN_ID,
+        version: VERSION,
+        enabled: settings.Enabled === true,
+        dryRun: settings.DryRun === true,
+        storageReady: state.storageReady === true
+      },
+      settings: {
+        Enabled: settings.Enabled === true,
+        Damping: settings.Damping,
+        MaxAdjustment: settings.MaxAdjustment,
+        MinimumMultiplier: settings.MinimumMultiplier,
+        MaximumMultiplier: settings.MaximumMultiplier,
+        DryRun: settings.DryRun === true
+      },
+      profile: {
+        activeTitle: state.activeProfileTitle === null ? null : state.activeProfileTitle
+      },
+      machine: {
+        serial: state.activeSerial === null ? null : state.activeSerial,
+        model: state.activeModel === null ? null : state.activeModel,
+        // The multiplier the plugin last read from the machine, not a live read:
+        // a `/status` call never talks to Decaid.
+        currentMultiplier: statusNumber(state.lastSeenMultiplier),
+        calibration: machineStatus(active)
+      },
+      machines: machines,
+      evaluation: {
+        historyRevision: state.historyRevision,
+        lastEvaluatedHistoryRevision: state.lastEvaluatedHistoryRevision,
+        lastEvaluatedAt: state.lastEvaluatedAt,
+        lastDecision: state.lastDecision
+      }
+    };
+  }
+
   return {
     id: PLUGIN_ID,
     version: VERSION,
     onLoad: onLoad,
     onUnload: onUnload,
     onEvent: onEvent,
+    // Decaid serves GET /api/v1/plugins/{id}/{endpoint} for every endpoint the
+    // manifest declares as http. `status` is declared there; anything else is
+    // not ours to answer.
+    __httpRequestHandler: function (request) {
+      if (!request || request.endpoint !== "status") {
+        return jsonResponse(request, 404, { error: "not_found" });
+      }
+      return jsonResponse(request, 200, statusDocument());
+    },
     __test: {
       canonicalize: canonicalize,
       timestampSeconds: timestampSeconds,

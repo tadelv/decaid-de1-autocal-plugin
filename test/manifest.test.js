@@ -42,6 +42,17 @@ test('the manifest requests exactly the permissions the design allows', () => {
   ]);
 });
 
+test('the manifest declares the status endpoint it serves', () => {
+  // Decaid only routes GET /api/v1/plugins/{id}/{endpoint} for endpoints the
+  // manifest declares, so an undeclared handler is dead code.
+  const http = manifest.api.filter(entry => entry.type === 'http');
+  assert.deepEqual(http.map(entry => entry.id), ['status']);
+  for (const entry of manifest.api) {
+    assert.equal(typeof entry.id, 'string');
+    assert.ok(entry.data && typeof entry.data === 'object', entry.id);
+  }
+});
+
 test('every setting carries a type, a label and a description', () => {
   const types = ['string', 'number', 'boolean', 'enum'];
   for (const [key, setting] of Object.entries(manifest.settings)) {

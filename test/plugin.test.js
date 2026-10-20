@@ -603,6 +603,136 @@ test('dry run logs evidence failures as skip rather than dry_run', async () => {
   assert.doesNotMatch(harness.logs.at(-1), /action=dry_run/);
 });
 
+// `/status` is the read-only mirror a skin (or anyone on the tablet's network)
+// can poll. It must answer from memory: no API call, no storage write and no
+// state change, so it works with the machine off and cannot race an evaluation.
+async function status(harness) {
+  const res = await harness.plugin.__httpRequestHandler({
+    requestId: 'r1', endpoint: 'status', method: 'GET', headers: {}, body: null, query: {},
+  });
+  assert.equal(res.requestId, 'r1');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['Content-Type'], 'application/json');
+  return JSON.parse(res.body);
+}
+
+test('status answers from memory before hydration, without calling Decaid', async () => {
+  const harness = createHarness({});
+  const before = harness.fetchCalls().length;
+  const body = await status(harness);
+  assert.equal(harness.fetchCalls().length, before);
+  assert.equal(body.schemaVersion, 1);
+  assert.equal(body.plugin.id, manifest.id);
+  assert.equal(body.plugin.version, manifest.version);
+  assert.equal(body.plugin.storageReady, false);
+  assert.equal(body.plugin.enabled, true);
+  assert.equal(body.profile.activeTitle, null);
+  assert.deepEqual(body.machine, { serial: null, model: null, currentMultiplier: null, calibration: null });
+  assert.deepEqual(body.machines, {});
+  assert.deepEqual(body.evaluation, {
+    historyRevision: 0,
+    lastEvaluatedHistoryRevision: -1,
+    lastEvaluatedAt: null,
+    lastDecision: null,
+  });
+});
+
+test('status reports the profile, the last decision and the machine record', async () => {
+  const harness = await validRun({ shotOptions1: { noScale: true } });
+  const body = await status(harness);
+  assert.equal(body.plugin.storageReady, true);
+  assert.equal(body.profile.activeTitle, 'Profile');
+  assert.equal(body.machine.serial, '12345');
+  assert.equal(body.machine.model, 'DE1Pro');
+  assert.equal(body.machine.currentMultiplier, 0.8);
+  assert.deepEqual(body.machine.calibration, {
+    baselineMultiplier: 0.8,
+    lastPluginAppliedMultiplier: null,
+    ownsCurrentMultiplier: false,
+  });
+  assert.equal(body.evaluation.lastDecision.action, 'skip');
+  assert.equal(body.evaluation.lastDecision.reason, 'no_scale_data');
+  assert.ok(!Number.isNaN(Date.parse(body.evaluation.lastEvaluatedAt)));
+});
+
+test('status shows the applied multiplier and ownership after a write', async () => {
+  const harness = await validRun({ current: 0.8, desired1: 0.9 });
+  const before = harness.fetchCalls().length;
+  const body = await status(harness);
+  assert.equal(harness.fetchCalls().length, before, 'a status read never calls Decaid');
+  assert.equal(body.evaluation.lastDecision.action, 'apply');
+  assert.equal(body.evaluation.lastDecision.target, '0.850');
+  assert.equal(body.machine.currentMultiplier, 0.8, 'the multiplier read before the write');
+  assert.deepEqual(body.machine.calibration, {
+    baselineMultiplier: 0.8,
+    lastPluginAppliedMultiplier: 0.85,
+    ownsCurrentMultiplier: true,
+  });
+  assert.deepEqual(body.machines, { '12345': body.machine.calibration });
+});
+
+test('status shows a pending history revision without re-evaluating', async () => {
+  const harness = await validRun({ shotOptions1: { noScale: true } });
+  await harness.event('shotStored', { id: 'late' });
+  const body = await status(harness);
+  assert.equal(body.evaluation.historyRevision, 1);
+  assert.equal(body.evaluation.lastEvaluatedHistoryRevision, 0);
+});
+
+test('status settings mirror what the plugin actually runs with', async () => {
+  const harness = await validRun({ settings: { Enabled: false, DryRun: true, Damping: 0.25 } });
+  const body = await status(harness);
+  assert.equal(body.plugin.enabled, false);
+  assert.equal(body.plugin.dryRun, true);
+  assert.deepEqual(body.settings, {
+    Enabled: false,
+    Damping: 0.25,
+    MaxAdjustment: 0.1,
+    MinimumMultiplier: 0.35,
+    MaximumMultiplier: 2.0,
+    DryRun: true,
+  });
+});
+
+test('status forgets a machine that stops being an eligible DE1', async () => {
+  let model = 'DE1Pro';
+  const harness = createHarness({
+    fetchHook: ({ url }) => {
+      if (new URL(url).pathname === '/api/v1/machine/info') {
+        return response({ version: 'v1.1.0', model, serialNumber: '12345' });
+      }
+    },
+  });
+  await harness.start();
+  await harness.workflow({ title: 'Profile' });
+  assert.equal((await status(harness)).machine.serial, '12345');
+
+  // A Bengle on the other end of the cable is not a DE1: no stale record may stay.
+  model = 'Bengle';
+  await harness.workflow({ title: 'Other profile' });
+  const body = await status(harness);
+  assert.deepEqual(body.machine, { serial: null, model: null, currentMultiplier: null, calibration: null });
+  assert.equal(body.evaluation.lastDecision.reason, 'non_de1_machine');
+});
+
+test('only the declared status endpoint is answered; anything else is a 404', async () => {
+  const harness = createHarness({});
+  for (const request of [
+    { requestId: 'r2', endpoint: 'apply', method: 'POST', headers: {}, body: {}, query: {} },
+    { requestId: 'r3', endpoint: 'skin', method: 'GET', headers: {}, body: null, query: {} },
+    { requestId: 'r4', endpoint: undefined, method: 'GET', headers: {}, body: null, query: {} },
+  ]) {
+    const res = await harness.plugin.__httpRequestHandler(request);
+    assert.equal(res.requestId, request.requestId);
+    assert.equal(res.status, 404, String(request.endpoint));
+    assert.deepEqual(JSON.parse(res.body), { error: 'not_found' });
+  }
+  const ignored = await harness.plugin.__httpRequestHandler({
+    requestId: 'r5', endpoint: 'status', method: 'POST', headers: {}, body: { anything: true }, query: { raw: '1' },
+  });
+  assert.equal(ignored.status, 200, 'the status read is safe to call with any method, body or query');
+});
+
 test('malformed persisted state is discarded instead of granting ownership', async () => {
   const malformed = [
     { version: 2, machines: {} },

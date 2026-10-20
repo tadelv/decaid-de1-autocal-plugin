@@ -62,6 +62,60 @@ develop without hardware, point a local Decaid at the directory and use
 | Maximum multiplier | 2.0 | Upper bound of the operational range. |
 | Dry run | off | Do the whole analysis, log the target, never write. |
 
+## Status endpoint
+
+The manifest declares one HTTP endpoint, `status`. It answers from memory — no
+Decaid API call, no storage write, no state change — so it works with the
+machine switched off and cannot race an evaluation:
+
+```bash
+curl -s http://localhost:8080/api/v1/plugins/auto-flow-cal.reaplugin/status
+```
+
+```json
+{
+  "schemaVersion": 1,
+  "plugin": { "id": "auto-flow-cal.reaplugin", "version": "1.3.0",
+    "enabled": true, "dryRun": false, "storageReady": true },
+  "settings": { "Enabled": true, "Damping": 0.5, "MaxAdjustment": 0.1,
+    "MinimumMultiplier": 0.35, "MaximumMultiplier": 2.0, "DryRun": false },
+  "profile": { "activeTitle": "D-Flow / default" },
+  "machine": { "serial": "12345", "model": "DE1Pro", "currentMultiplier": 0.8,
+    "calibration": { "baselineMultiplier": 0.8, "lastPluginAppliedMultiplier": 0.85,
+      "ownsCurrentMultiplier": true } },
+  "machines": { "12345": { "baselineMultiplier": 0.8,
+    "lastPluginAppliedMultiplier": 0.85, "ownsCurrentMultiplier": true } },
+  "evaluation": { "historyRevision": 2, "lastEvaluatedHistoryRevision": 2,
+    "lastEvaluatedAt": "2026-01-01T10:00:00.000Z",
+    "lastDecision": { "action": "apply", "profile": "\"Profile\"", "estimate": "0.900",
+      "current": "0.800", "target": "0.850" } }
+}
+```
+
+- `machine` is the machine of the most recent evaluation; `machines` is every
+  serial the plugin remembers. Both are `null`/empty before the first evaluation
+  of an eligible DE1.
+- `calibration` is the plugin's own baseline/ownership record, not a live read of
+  the machine. `currentMultiplier` is the value the plugin read from the machine at
+  the most recent evaluation; both only move when an evaluation runs, so a
+  calibration changed by another app shows up after the next evaluation reports
+  `external_override` and drops ownership.
+- `evaluation.lastDecision` is the same structured record as the
+  `[auto-flow-cal]` log line: `action` is `apply`, `dryRun`, `restore` or `skip`,
+  with `reason` on anything but a successful write.
+- `historyRevision > lastEvaluatedHistoryRevision` means a shot arrived that has
+  not been evaluated yet (no profile change has followed it).
+- Any other endpoint is answered with `404 {"error":"not_found"}`; the endpoint
+  ignores method, body and query. (Decaid itself refuses an endpoint the manifest
+  does not declare — `404 {"error":"endpoint <id> not available"}` — so that
+  branch is defensive only.)
+- The route exists only while the plugin is loaded: with the plugin disabled,
+  `GET .../status` answers `404 {"error":"plugin with auto-flow-cal.reaplugin not
+  loaded"}`. Skins must treat any 404 as "no status".
+
+The shape is versioned (`schemaVersion`) because skins read it: see
+[`STREAMLINE_INTEGRATION.md`](STREAMLINE_INTEGRATION.md).
+
 ## Baseline and ownership
 
 DE1 flow calibration is machine-global, so the plugin remembers, per serial:
