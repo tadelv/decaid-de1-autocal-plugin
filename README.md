@@ -1,5 +1,7 @@
 # DE1 Auto Flow Calibration — Decaid plugin
 
+**New supervised trial:** [full-update calibrator](updater/README.md) — one usable new shot, 100% gain, no per-shot cap. Built separately, disabled by default; the [Streamline UI with per-profile Manual/Auto controls](updater/UI.md) is installed in the operator-approved 0.4.0 trial, while host queued-write guards remain deferred. The legacy two-shot plugin described below must stay disabled during that trial.
+
 Automatically adjusts a connected DE1's flow-estimation multiplier when the
 active espresso profile changes, using only gravimetric evidence from the two
 most recent shots recorded for that profile program.
@@ -182,7 +184,10 @@ machine identity or be applied without gravimetric evidence.
 ## Development
 
 ```bash
-npm test    # manifest, estimator and plugin conformance suite (node --test, no dependencies)
+npm test             # all tests (node --test, no dependencies)
+npm run test:replay  # anonymized real-shot regressions and timing/window diagnostics, fully offline
+npm run fit:offline  # experimental last-step curve alignment; never writes calibration
+npm run build:observer # separate observe-only tablet trial package
 npm run check
 ```
 
@@ -202,6 +207,15 @@ node tools/why-skip.js --decaid http://<decaid>:8080 --json > evidence.json
 ```
 
 It is read-only: three `GET`s, no writes, nothing persisted.
+
+The [real-shot fixtures](test/fixtures/real-shots/README.md) preserve the two
+observed eligibility failures alongside accepted and missing-scale controls.
+Their timing/window ratios are diagnostics, not validated calibration targets.
+The separate [last-step fitting experiment](docs/research/experimental-flow-fit.md)
+and [chart preview](docs/research/flow-fit-preview.html) are offline only; the
+production writer does not import the experimental fitter. The separate
+[Flow Calibration Observer](observer/README.md) bundles it for an observe-only
+tablet trial; it never applies calibration.
 
 The tests load the production `plugin.js` into a `node:vm` sandbox with a mocked
 host and `fetch`, and the fixtures mirror Decaid's real serialization (paginated

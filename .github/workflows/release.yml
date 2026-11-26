@@ -9,6 +9,8 @@ permissions:
 
 jobs:
   release:
+    # The separate 0.x updater uses supervised drafts, never automatic publishing.
+    if: ${{ !startsWith(github.ref_name, 'v0.') && !startsWith(github.ref_name, '0.') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -1,5 +1,7 @@
 # Streamline integration: where the applied calibration can show up
 
+**Implementation update:** the separate updater's **0.4.0** provides a compact Brew `tile-line`, overlay with persistent per-profile Manual/Auto controls, Settings Open action and skin-only push updates. Native M50Mini/Streamline 0.2.34 fixture validation passed, including keyboard entry of 2.000 and returning to Auto; no real manual-calibration write was tested. Manual selection uses the exact profile title per DE1 because current workflow JSON has no stable profile-record ID. The explicitly approved p85pro rollout is now verified on 0.4.0: calibration stayed at 0.835, all three shot records and automatic values survived migration to schema 2, and the read-only live UI endpoints return the correct Auto value. Real manual calibration changes still need an approved hardware test. See [current UI behavior and evidence](updater/UI.md). The research below describes the earlier legacy-plugin integration.
+
 Research note on `decentespresso/streamline-js` at `d28da12` (v0.2.17 plus the
 `feat/shot-companion-plugin` merge). Read from the repo itself:
 
