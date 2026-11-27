@@ -54,7 +54,7 @@ The temporary 0.4.0 implementation passed controller/browser regressions and nat
 
 Current regression tests exercise the compiled original-ID bundle, parser contract, escaped/untrusted text, framing-origin extraction, failed reads, stale context, explicit Manual/Auto requests, polling cleanup, decimal validation, duplicate prevention and storage failures. With `STREAMLINE_SOURCE` supplied, the actual Streamline parser is also tested; CI explicitly skips that optional case without the checkout.
 
-Real manual hardware writes and real-device Manual/profile-switch/restart behavior remain pending operator testing. The [release checklist](RELEASE-2.0.0.md) records that gate. Publication remains separate from deployment and needs explicit approval.
+The operator accepted the p85pro UI, reported a successful normal shot and approved release on 2026-11-27. Read-only inspection verified Auto processing and a correct no-change result inside the deadband. Real manual hardware writes and real-device Manual/profile-switch/restart behavior have not been independently confirmed; regression/fixture coverage does not establish those hardware results. The [release notes](RELEASE-2.0.0.md) record the test scope and known limits.
 
 ## Historical trial evidence
 

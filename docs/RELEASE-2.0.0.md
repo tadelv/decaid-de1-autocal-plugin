@@ -1,6 +1,6 @@
 # Auto Flow Calibration 2.0.0
 
-**Unpublished draft. Do not publish before the operator completes testing and explicitly approves release.** This upgrades the original **`auto-flow-cal.reaplugin`**; it is not a separate updater product. Keep the release marked as a prerelease until that decision.
+**Operator-approved release for supervised use.** This upgrades the original **`auto-flow-cal.reaplugin`**; it is not a separate updater product. Calibration changes still require the precautions below; this release does not certify unattended operation.
 
 ## Changes
 
@@ -25,15 +25,13 @@ Regression coverage includes the actual checked-in compiled package, runtime/man
 
 The explicitly approved p85pro replacement is verified: the temporary updater was disabled first, original-ID **2.0.0** loaded and armed on the pinned DE1 with the actual multiplier unchanged at **0.835**, and the temporary plugin was then removed. The original legacy `state` entry was unchanged, while `calibration-v2` started fresh with current 0.835 baseline, no imported automatic values/manual choices and old history fenced. Other plugins and the active profile were unchanged. Real read-only view/skin/UI checks passed; no startup application or manual test command was issued. This deployment result is not a real manual-write validation.
 
-## Remaining operator gate
+## Release approval and hardware test scope
 
-No agent-driven manual hardware test is authorized by this document.
+On **2026-11-27**, the operator accepted the p85pro UI, pulled a normal shot, reported that it worked well and approved release. Independent read-only inspection confirmed that the original 2.0.0 runtime consumed that new shot once in Auto mode, with captured calibration **0.835** and a fitted target **0.827224** from **5 seconds** of final-step evidence, without warnings.
 
-1. Check the p85pro Brew value/overlay against the machine read and confirm the original plugin is loaded while the temporary updater is absent.
-2. Between shots, choose the intended manual profile/value. Verify the actual read-back and terminal result without duplicate writes or silent reversion.
-3. Once each prior action finishes, switch away/back and restart Decaid. Confirm the manual choice persists and other profiles retain their own choices.
-4. Return to Auto, verify the expected saved value/baseline and check that only a subsequent usable shot trains. Wait for its terminal result before another shot.
-5. Record results and explicitly approve publication. The accepted keyboard-resize workaround alone does not block this first version; unsafe or incorrect behavior does.
+The rounded target differs from 0.835 by **0.008**, below the **0.010** automatic-learning deadband. The terminal result was **`no_write_needed`**: calibration correctly stayed **0.835**, with no hold, pending work or unresolved intent. This verifies processing and stable no-change behavior, not a new physical calibration write or universal convergence.
+
+Real manual-value application and real-device Manual/profile-switch/restart behavior have not been independently confirmed. They retain regression/fixture coverage and remain follow-up validation; approval of this release is not a claim that those hardware scenarios passed. This document authorizes no additional agent-driven machine commands.
 
 ## Known limits
 

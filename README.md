@@ -1,6 +1,6 @@
 # Auto Flow Calibration — Decaid plugin
 
-**2.0.0 is an upgrade of the existing plugin, not a new plugin.** Its ID remains **`auto-flow-cal.reaplugin`**, so Decaid can update the original installation. The GitHub release remains an unpublished candidate until the operator completes testing and approves publication. The operator-approved p85pro replacement is verified: **2.0.0 loaded and ready, temporary updater removed, multiplier unchanged at 0.835**.
+**2.0.0 is an upgrade of the existing plugin, not a new plugin.** Its ID remains **`auto-flow-cal.reaplugin`**, so Decaid can update the original installation. The operator approved release after checking the UI and a normal shot on p85pro; calibration still requires supervised use. The operator-approved p85pro replacement is verified: **2.0.0 loaded and ready, temporary updater removed, multiplier unchanged at 0.835**.
 
 It brings the displayed scale weight-flow and machine water-flow lines closer by adjusting the machine's estimation multiplier between shots. Calibration can affect flow-controlled extraction, not only the chart. Keep testing supervised.
 
@@ -19,7 +19,7 @@ Manual choices currently use the exact profile title per DE1. Same-named profile
 
 ## Installation and settings
 
-[Decaid installation instructions](https://decentespresso.com/docs/how_to_install_skins_or_plugins_on_decaid). Use the release's **`auto-flow-cal-v2.0.0.zip`**, or the checked-in `auto-flow-cal.reaplugin/` directory. It contains the complete built plugin; copying `src/plugin.js` alone does not work. The normal public GitHub route still serves 1.4.0 while 2.0.0 is a draft.
+[Decaid installation instructions](https://decentespresso.com/docs/how_to_install_skins_or_plugins_on_decaid). Use the release's **`auto-flow-cal-v2.0.0.zip`**, or the checked-in `auto-flow-cal.reaplugin/` directory. It contains the complete built plugin; copying `src/plugin.js` alone does not work. The normal public GitHub installation route uses the latest published release.
 
 | Setting | Fresh default | Meaning |
 |---|---|---|

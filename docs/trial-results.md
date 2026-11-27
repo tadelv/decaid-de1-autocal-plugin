@@ -105,6 +105,16 @@ The live original 1.4.0 state, temporary 0.4.0 state/configuration/status, known
 | Persistence | New `calibration-v2` baseline/expected **0.835**; empty consumed/program/manual maps; old history fenced; original legacy `state` untouched |
 | Other state | Active profile and all unrelated plugin metadata/loaded/autoload flags unchanged; no hold/pending/unresolved intent |
 
-The real `view`, `skin` and `ui` returned the correct Auto value and editable-ready controls. Reading them left the new ledger unchanged. No manual value was sent. Earlier three-shot learning records and preferences were **backed up, not migrated**, as requested. No app reset, profile change, firmware change, machine wake or M50 operation was performed. Real manual/profile-switch/restart validation and publication remain separate gates.
+The real `view`, `skin` and `ui` returned the correct Auto value and editable-ready controls. Reading them left the new ledger unchanged. No manual value was sent. Earlier three-shot learning records and preferences were **backed up, not migrated**, as requested. No app reset, profile change, firmware change, machine wake or M50 operation was performed. Real manual/profile-switch/restart validation was not established by this installation; the later release approval and normal-shot result are recorded below.
 
 Ignored evidence: `.pi/original-v2-rollout/2026-11-27T06-33-40-429Z/` (`before.json`, `candidate.json`, known previous source copies, disable/source/settings/enable/removal responses, `original-ready-before-removal.json`, `verified.json`, `live-ui.html`). The helper is `.pi/original-v2-rollout/install.cjs`; its allowlist contains only the two named plugins' management routes, never calibration, workflow or KV mutation routes. Do not rerun a partially completed install blindly.
+
+## First original-ID shot and release approval — 2026-11-27
+
+The operator inspected the UI, pulled a normal shot on p85pro, reported that it worked well and approved release. The original 2.0.0 runtime remained ready in Auto with exactly one consumed new shot. Its captured machine provenance was the pinned DE1 and historical multiplier **0.835**. The zero-lag fitter returned **0.8272236318** from **5.0 seconds** / **9 blocks**, without warnings.
+
+The rounded **0.827** target is **0.008** from current **0.835**, below the learning deadband **0.010**. The terminal decision was **`no_write_needed`**, correctly leaving calibration **0.835**, without hold, pending work or unresolved intent. The target was retained as an estimate, not falsely recorded as a newly verified applied value. No historical replay or duplicate processing occurred.
+
+This is a successful new-shot processing/no-change observation plus the operator's qualitative approval, not proof of physical accuracy, a new verified physical write or general convergence. Real manual-value and Manual/profile-switch/restart hardware results have not been independently confirmed. The operator approved release with the existing supervised-use limits; those limits remain explicit in the release notes.
+
+Private read-only evidence: `.pi/release-v2.0.0/post-shot-evidence.json`. No tablet source/settings/profile/state/calibration command was issued during release verification.
