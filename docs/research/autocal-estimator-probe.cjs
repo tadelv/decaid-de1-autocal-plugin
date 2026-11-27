@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const source = fs.readFileSync(path.join(__dirname, '../../auto-flow-cal.reaplugin/plugin.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../../test/legacy/v1.4.0-plugin.js'), 'utf8');
 const estimator = vm.runInNewContext(source + '\ncreatePlugin')({log(){},storage(){}}).__test;
 function shot({pressure=9,noise=0,flowSlope=0}={}) {
   const measurements=[];

@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const source = fs.readFileSync(path.join(__dirname, '../auto-flow-cal.reaplugin/plugin.js'), 'utf8');
+// Historical 1.4.0 rejection characterization; plugin.test.js covers current v2 fixture fits.
+const source = fs.readFileSync(path.join(__dirname, 'legacy/v1.4.0-plugin.js'), 'utf8');
 const estimator = vm.runInNewContext(`${source}\ncreatePlugin`, {
   fetch() { throw new Error('Real-shot replay must not access the network'); },
 })({

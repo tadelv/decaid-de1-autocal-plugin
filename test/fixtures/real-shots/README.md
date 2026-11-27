@@ -2,7 +2,7 @@
 
 Run `npm run test:replay` (also included in `npm test`). No network, tablet, environment variables, dependencies or original exports are needed.
 
-These fixtures were captured read-only on 2026-11-24 for the [tablet investigation](../../../docs/research/p85pro-shot-replay.md). They exercise the same production `estimateShot` seam as `test/estimator.test.js`; the suite does not replace or relax the estimator.
+These fixtures were captured read-only on 2026-11-24 for the [tablet investigation](../../../docs/research/p85pro-shot-replay.md). They preserve the frozen 1.4.0 `estimateShot` seam from `test/legacy-estimator.test.js`. Current v2 fitting and live-bundle behavior are tested separately in `test/flow-fit.test.js` and `test/plugin.test.js`.
 
 | Fixture | Original capture prefix | Samples | Baseline observation |
 |---|---|---:|---|
@@ -32,6 +32,6 @@ The two diagnostic tests use manually selected windows, not automatic window sel
 
 Each start boundary, end boundary and scale timestamp is independently shifted by -0.25, 0 and +0.25 s: **27 combinations per shot**. Production integration/interpolation helpers produce a printed nominal ratio and sensitivity range. The nominal ratios happen to be near 0.995, but **there is no independently measured correct calibration for these shots**. They are diagnostic ratios, not recommendations to change the machine from 1.130. Tests reject scale extrapolation and never use these windows to override the production eligibility verdict.
 
-`npm run fit:offline` runs the separate, **experimental last-step curve fitter** on these same fixtures. Its synthetic and real-shot tests live in `test/flow-fit.test.js`; neither it nor its diagnostic estimates are loaded by the production plugin.
+`npm run fit:offline -- --v2` runs the current **zero-lag final-step fitter** on these fixtures. Without `--v2`, it retains the historical v1 comparison method. Synthetic/real-shot cases live in `test/flow-fit.test.js`; `test/plugin.test.js` verifies the compiled current plugin against the v2 offline result. CLI replay never applies calibration.
 
-This suite covers estimator behavior only. Existing `test/plugin.test.js` covers event handling, metadata, machine identity and verified writes; this fixture suite does not add UI, post-shot scheduling, per-profile persistence, new eligibility rules or a production lag model.
+This suite covers estimator behavior only. Current `test/plugin.test.js` covers event handling, identity, verified writes, eligibility and per-profile persistence; `test/legacy-plugin.test.js` retains the old policy characterization. This historical fixture suite does not impose the legacy flatness gates on current v2 behavior.

@@ -1,9 +1,7 @@
-// Shared fitting core. Legacy observer/replay retain v1; the opt-in live updater uses v2.
+// Shared fitting core. Historical observer/replay retain v1; Auto Flow Calibration 2.x uses v2.
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '../auto-flow-cal.reaplugin/plugin.js'), 'utf8');
-const helpers = vm.runInNewContext(`${source}\ncreatePlugin`)({ log() {}, storage() {} }).__test;
+const helpers = require('../src/measurement-helpers').createMeasurementHelpers();
 function createExperimentalFlowFitter(helpers, options = {}) {
 const zeroOnly = options.primaryZeroOnly === true;
 const method = zeroOnly ? 'fixed_zero_lag_v2' : 'fixed_zero_lag_v1';
@@ -147,13 +145,14 @@ const fitFlowZeroLag = createExperimentalFlowFitter(helpers, { primaryZeroOnly: 
 module.exports = { fitFlow, fitFlowZeroLag, createExperimentalFlowFitter };
 
 if (require.main === module) {
-  const files = process.argv.slice(2);
+  const zeroOnly = process.argv.includes('--v2');
+  const files = process.argv.slice(2).filter(value => value !== '--v2');
   const inputs = files.length ? files : ['short-output-tail', 'noisy-pressure-plateau', 'accepted-control', 'missing-scale-control']
     .map(name => path.join(__dirname, '../test/fixtures/real-shots', `${name}.json`));
   for (const file of inputs) {
     const value = JSON.parse(fs.readFileSync(file, 'utf8'));
     for (const shot of Array.isArray(value) ? value : [value]) {
-      console.log(JSON.stringify({ id: shot.id, ...fitFlow(shot) }));
+      console.log(JSON.stringify({ id: shot.id, ...(zeroOnly ? fitFlowZeroLag(shot) : fitFlow(shot)) }));
     }
   }
 }

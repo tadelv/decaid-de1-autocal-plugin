@@ -1,7 +1,7 @@
 function createPlugin(host) {
   'use strict';
-  var ID = 'auto-flow-cal-updater.reaplugin', VERSION = '0.4.0';
-  var canonicalize = observerHelpers().canonicalize;
+  var ID = FLOW_CAL_METADATA.id, VERSION = FLOW_CAL_METADATA.version, STORAGE_KEY = 'calibration-v2';
+  var canonicalize = createMeasurementHelpers().canonicalize;
   var models = ['DE1', 'DE1Plus', 'DE1Pro', 'DE1XL', 'DE1Cafe', 'DE1XXL', 'DE1XXXL'];
   var enabled = false, expectedSerial = '', boundModel = null, stopped = true, ready = false, hydrated = false, held = null;
   var generation = 0, activeKey = null, activeTitle = null, pending = null, waiting = null, retryQueued = false, lastRetry = 0, controlBusy = false;
@@ -9,7 +9,7 @@ function createPlugin(host) {
   var session = Date.now().toString(36) + '-' + Math.random().toString(36), revision = 0;
   var ui = createFlowCalibrationUI(host, get, status, function () { return expectedSerial; }, models);
 
-  // v2 prevents an older writer from silently ignoring persistent manual overrides after a downgrade.
+  // Fresh versioned storage leaves the legacy 1.x state untouched; no migration is attempted.
   function empty() { return { version: 2, machines: {}, pending: null }; }
   function context() { return session + ':' + generation + ':' + revision; }
   function canSetMode() { return alive(generation) && !!activeTitle && !!activeTitle.trim() && !waiting && !db.pending && !controlBusy; }
@@ -32,7 +32,7 @@ function createPlugin(host) {
   function note(reason, extra) {
     var result = Object.assign({ reason: reason, at: new Date().toISOString() }, extra || {});
     decisions.unshift(result); decisions = decisions.slice(0, 20);
-    host.log('[flow-updater] ' + JSON.stringify(result));
+    host.log('[auto-flow-cal] ' + JSON.stringify(result));
     ui.changed(reason);
   }
   function hold(reason) { held = reason; pending = null; note(reason); }
@@ -55,7 +55,7 @@ function createPlugin(host) {
         if (waiting && waiting.token === token) { waiting = null; reject(new Error('storage_ack_timeout')); }
       }, 10000);
       waiting = { token: token, resolve: resolve, reject: reject, timer: timer };
-      try { host.storage({ type: 'write', key: 'state', namespace: ID, data: JSON.parse(JSON.stringify(db)) }); }
+      try { host.storage({ type: 'write', key: STORAGE_KEY, namespace: ID, data: JSON.parse(JSON.stringify(db)) }); }
       catch (error) { clearTimeout(timer); waiting = null; reject(new Error('storage_write_failed')); }
     });
   }
@@ -265,7 +265,7 @@ function createPlugin(host) {
     onLoad: function (settings) {
       stopped = false; enabled = !!settings && settings.Enabled === true;
       expectedSerial = settings && typeof settings.ExpectedSerial === 'string' ? settings.ExpectedSerial.trim() : '';
-      try { host.storage({ type: 'read', key: 'state', namespace: ID }); }
+      try { host.storage({ type: 'read', key: STORAGE_KEY, namespace: ID }); }
       catch (error) { hold('storage_read_failed'); }
     },
     onUnload: stop,
@@ -277,7 +277,7 @@ function createPlugin(host) {
         }
         return;
       }
-      if (event.name === 'storageRead' && event.payload && event.payload.key === 'state' && !hydrated) {
+      if (event.name === 'storageRead' && event.payload && event.payload.key === STORAGE_KEY && !hydrated) {
         hydrated = true;
         return serialized(async function () {
           db = event.payload.value == null ? empty() : validate(event.payload.value);

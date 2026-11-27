@@ -1,4 +1,6 @@
-# Live supervised trial — installation and arming
+# Supervised calibration trials — installation and replacement
+
+**Current:** the original **`auto-flow-cal.reaplugin` 2.0.0** is installed and ready on p85pro. The temporary `-updater` plugin is removed; calibration stayed **0.835**. The earlier sections below are historical trial evidence, not instructions to reinstall that separate plugin. See the final section for the original-ID replacement.
 
 2026-11-26. Operator explicitly approved installation and enabling on the verified physical DE1Pro, with the host queued-write gap deferred. The serial is pinned in settings; raw identity, address and shot captures remain in ignored local artifacts.
 
@@ -88,3 +90,21 @@ Initial installation evidence: `.pi/updater-build/` (ignored).
 - `install-live-trial.cjs`: initial-install helper only; do not run it against an already-enabled deployment.
 
 0.4.0 rollout evidence: `.pi/updater-rollout/2026-11-26T19-40-26-723Z/`. `before.json` contains the exact live raw ledger and state; `previous-submitted-source.json` preserves the known earlier source payload (not newly retrieved remote bytes), `candidate.json` the submitted 0.4.0 payload, and `verified.json` the migration/configuration/read-only UI and unchanged-calibration checks. `backup-notes.json` records source hashes and provenance. The new bounded helper is `.pi/updater-rollout/upgrade.cjs`.
+
+## Original-ID 2.0.0 replacement — verified 2026-11-27
+
+The operator clarified that this work must upgrade the original plugin, waived settings migration and explicitly requested removal of the temporary updater from p85pro. Fresh identity and between-shot/sleeping-state checks passed; the active coordinating lane acknowledged hands-off and was explicitly released after verification.
+
+The live original 1.4.0 state, temporary 0.4.0 state/configuration/status, known submitted source, workflow, plugin metadata and actual calibration were backed up first. The original `calibration-v2` key was confirmed unused. The temporary updater was disabled, the original plugin source replaced with **2.0.0**, its serial/enable settings configured deliberately and its runtime enabled. Only after it was independently verified ready was the temporary updater uninstalled.
+
+| Check | Result |
+|---|---|
+| Product / identity | **Auto Flow Calibration 2.0.0**, original `auto-flow-cal.reaplugin` |
+| Runtime / ownership | Loaded, ready, enabled, pinned; autoload true; temporary updater absent |
+| Actual multiplier | **0.835 before and after**, no startup or direct calibration command |
+| Persistence | New `calibration-v2` baseline/expected **0.835**; empty consumed/program/manual maps; old history fenced; original legacy `state` untouched |
+| Other state | Active profile and all unrelated plugin metadata/loaded/autoload flags unchanged; no hold/pending/unresolved intent |
+
+The real `view`, `skin` and `ui` returned the correct Auto value and editable-ready controls. Reading them left the new ledger unchanged. No manual value was sent. Earlier three-shot learning records and preferences were **backed up, not migrated**, as requested. No app reset, profile change, firmware change, machine wake or M50 operation was performed. Real manual/profile-switch/restart validation and publication remain separate gates.
+
+Ignored evidence: `.pi/original-v2-rollout/2026-11-27T06-33-40-429Z/` (`before.json`, `candidate.json`, known previous source copies, disable/source/settings/enable/removal responses, `original-ready-before-removal.json`, `verified.json`, `live-ui.html`). The helper is `.pi/original-v2-rollout/install.cjs`; its allowlist contains only the two named plugins' management routes, never calibration, workflow or KV mutation routes. Do not rerun a partially completed install blindly.

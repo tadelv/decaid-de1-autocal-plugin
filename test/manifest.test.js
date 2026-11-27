@@ -32,9 +32,11 @@ test('the manifest id is the package directory name and a safe path component', 
   assert.notEqual(manifest.id, '..');
 });
 
-test('the manifest requests exactly the permissions the design allows', () => {
+test('the manifest requests exactly the capabilities used by calibration and UI', () => {
   assert.deepEqual([...manifest.permissions].sort(), [
     'api',
+    'emit',
+    'events.machine',
     'events.shots',
     'events.workflow',
     'log',
@@ -46,7 +48,8 @@ test('the manifest declares the endpoints it serves', () => {
   // Decaid only routes GET /api/v1/plugins/{id}/{endpoint} for endpoints the
   // manifest declares, so an undeclared handler is dead code.
   const http = manifest.api.filter(entry => entry.type === 'http');
-  assert.deepEqual(http.map(entry => entry.id), ['status', 'ui']);
+  assert.deepEqual(http.map(entry => entry.id), ['status', 'skin', 'ui', 'view', 'mode']);
+  assert.deepEqual(manifest.api.filter(entry => entry.type === 'websocket').map(entry => entry.id), ['changed']);
   for (const entry of manifest.api) {
     assert.equal(typeof entry.id, 'string');
     assert.ok(entry.data && typeof entry.data === 'object', entry.id);

@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { pathToFileURL } = require('node:url');
-const { buildUpdater } = require('../tools/build-updater');
+const { buildPlugin } = require('../tools/build-plugin');
 
 function harness() {
   const calls = [], pushes = [];
@@ -15,7 +15,7 @@ function harness() {
       { reason: 'applied_verified', previous: .956, applied: .881, at: '2026-11-26T12:00:00Z' },
     ] };
   const h = { current: .881, info: { model: 'DE1Pro', serialNumber: 'target' }, state, calls, pushes, pin: 'target', fail: false, hook: null };
-  const factory = vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../updater/ui.js'), 'utf8') + '\ncreateFlowCalibrationUI');
+  const factory = vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/ui.js'), 'utf8') + '\ncreateFlowCalibrationUI');
   h.ui = factory({ emit(name, data) { pushes.push({ name, data: JSON.parse(JSON.stringify(data)) }); } }, async route => {
     calls.push(route); if (h.hook) await h.hook(route);
     if (h.fail) throw new Error('offline');
@@ -239,7 +239,7 @@ test('shot diagnostics get plain-language explanations while raw identifiers rem
   assert.equal(m.resultText, 'A new value was estimated from the last shot.');
   assert.deepEqual(m.warningText, ['Not enough data to compare flow timing.', 'Flow timing may affect the estimate.', 'The flow measurements do not match closely.', 'Pressure changes may affect the estimate.']);
   assert.deepEqual(m.warnings, h.state.decisions[0].fit.warnings);
-  const html = h.page().body, settings = buildUpdater().manifest.settings;
+  const html = h.page().body, settings = buildPlugin().manifest.settings;
   assert.equal(settings.Enabled.label, 'Enable calibration changes');
   assert.equal(settings.ExpectedSerial.label, 'DE1 serial number');
   for (const text of ['Flow multiplier on your machine', 'Manual value', 'Use manual', 'Check again', 'More details', 'Support code']) assert.ok(html.includes(text));
@@ -261,7 +261,7 @@ test('browser command failures tell the user what to do without exposing backend
 test('surface survives the real Streamline parser', { skip: !process.env.STREAMLINE_SOURCE }, async () => {
   const parser = await import(pathToFileURL(path.join(process.env.STREAMLINE_SOURCE, 'src/modules/plugin-surfaces.js')));
   const h = harness(); h.ui.observe(h.info, .881);
-  const raw = h.skin(), parsed = parser.parseSkinAnswer(raw), manifest = buildUpdater().manifest;
+  const raw = h.skin(), parsed = parser.parseSkinAnswer(raw), manifest = buildPlugin().manifest;
   assert.equal(parsed.surfaces.length, 1); assert.equal(parsed.surfaces[0].text, raw.surfaces[0].text);
   assert.equal(parsed.surfaces[0].action.presentation, 'overlay'); assert.equal(parsed.surfaces[0].action.fit, true);
   assert.equal(parsed.surfaces[0].action.closeOnShot, true);

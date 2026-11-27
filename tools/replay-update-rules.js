@@ -1,11 +1,9 @@
 // Offline diagnostic replay only: no network, plugin storage or machine commands.
 const fs = require('node:fs');
 const path = require('node:path');
-const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 const { fitFlow } = require('./experimental-flow-fit');
-const source = fs.readFileSync(path.join(__dirname, '../auto-flow-cal.reaplugin/plugin.js'), 'utf8');
-const helpers = vm.runInNewContext(source + '\ncreatePlugin')({ log() {}, storage() {} }).__test;
+const helpers = require('../src/measurement-helpers').createMeasurementHelpers();
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
 function update(state, candidate, full) {

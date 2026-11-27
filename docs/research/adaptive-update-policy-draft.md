@@ -4,7 +4,7 @@
 
 **Approved experiment:** compare the original 50% gain / 0.100-cap rule with **100% gain / no per-shot cap** using offline historical replay and shadow proposals. Both retain overall bounds and the 0.010 write deadband. This approves comparison, not either rule as the live default, installation, or calibration writes. [Initial historical comparison](historical-update-rule-comparison.md).
 
-**Accepted build direction:** **100% gain with no per-shot cap** for a supervised live trial, retaining overall bounds, measurement eligibility and write deadband. The user explicitly deferred host queued-write guards, persistent manual override and Streamline UI to the next session. The opt-in [trial implementation](../../updater/README.md) is built separately and defaults to writes off. It is now installed and armed after explicit target-specific operator approval; startup was verified with calibration unchanged, and the first live update subsequently verified **1.130 → 0.956**. The operator reports much closer chart alignment on the follow-up pulled at 0.956; broader convergence remains unestablished. See the [trial record](../../updater/trial-results.md). The conservative rule below remains a comparison baseline, not the selected trial rule.
+**Accepted build direction:** **100% gain with no per-shot cap** for a supervised live trial, retaining overall bounds, measurement eligibility and write deadband. The user explicitly deferred host queued-write guards, persistent manual override and Streamline UI to the next session. The opt-in [trial implementation](../../README.md) is built separately and defaults to writes off. It is now installed and armed after explicit target-specific operator approval; startup was verified with calibration unchanged, and the first live update subsequently verified **1.130 → 0.956**. The operator reports much closer chart alignment on the follow-up pulled at 0.956; broader convergence remains unestablished. See the [trial record](../../updater/trial-results.md). The conservative rule below remains a comparison baseline, not the selected trial rule.
 
 ## Original conservative proposal (comparison baseline)
 
@@ -127,7 +127,7 @@ A no-fit shot creates no new update/application and does not erase a working val
 
 ### Host-side safety dependency — current API is insufficient
 
-**Supervised-trial exception:** the user explicitly accepted building the live path with this queued-write gap deferred. The separate trial build uses best-effort checks and reports the limitation; it is not an unattended release and does not claim the execution-time guarantees described below. Target identity and installation/enablement still require supervised preflight. See the [trial runbook](../../updater/README.md).
+**Supervised-trial exception:** the user explicitly accepted building the live path with this queued-write gap deferred. The separate trial build uses best-effort checks and reports the limitation; it is not an unattended release and does not claim the execution-time guarantees described below. Target identity and installation/enablement still require supervised preflight. See the [trial runbook](../../README.md).
 
 The current documented command (`Design.md`, section 26) sends only `flowMultiplier` through a queued device-write path. Inspected local `reaprime/lib/src/services/webserver/de1handler.dart:615–639` parses that value and calls `updateMachineCalibration`; it does not receive expected serial, workflow generation, idle state or calibration preconditions.
 

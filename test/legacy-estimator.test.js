@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-const source = fs.readFileSync(require('node:path').join(__dirname, '..', 'auto-flow-cal.reaplugin', 'plugin.js'), 'utf8');
+// Frozen legacy characterization, separate from the current v2 fitter tests.
+const source = fs.readFileSync(require('node:path').join(__dirname, 'legacy/v1.4.0-plugin.js'), 'utf8');
 
 function loadEstimator(settings) {
   const context = { fetch: async () => ({ ok: true, json: async () => ({}) }) };
