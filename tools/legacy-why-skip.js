@@ -1,14 +1,14 @@
 #!/usr/bin/env node
-// Why did a profile not calibrate?
+// Historical 1.4.0 estimator diagnostics only; not the current v2 calibration policy.
 //
 // Pulls the newest shots of a profile from a running Decaid, asks the plugin's
 // own estimator for the verdict, and then shows which of the flat-region
 // thresholds threw the evidence away. The thresholds are read out of plugin.js,
 // so this cannot drift from the code it explains.
 //
-//   node tools/why-skip.js --decaid http://m50mini.home:8080
-//   node tools/why-skip.js --decaid http://de1-tablet:8080 --profile "Baseline ULC" --limit 3
-//   node tools/why-skip.js --decaid http://… --json > evidence.json
+//   node tools/legacy-why-skip.js --decaid http://m50mini.home:8080
+//   node tools/legacy-why-skip.js --decaid http://de1-tablet:8080 --profile "Baseline ULC" --limit 3
+//   node tools/legacy-why-skip.js --decaid http://… --json > evidence.json
 //
 // Read-only: three GETs, no writes, nothing persisted.
 
@@ -18,8 +18,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const PACKAGE = path.join(__dirname, "..", "auto-flow-cal.reaplugin");
-const SOURCE = fs.readFileSync(path.join(PACKAGE, "plugin.js"), "utf8");
+const SOURCE = fs.readFileSync(path.join(__dirname, '../test/legacy/v1.4.0-plugin.js'), 'utf8');
 
 // The estimator itself is the authority; the constants are only for explaining it.
 const CONSTANTS = {};

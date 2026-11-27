@@ -17,8 +17,8 @@ jobs:
         with:
           node-version: 22
 
-      - name: Tests
-        run: npm test
+      - name: Check build and tests
+        run: npm run check && npm test
 
       # Decaid rejects a release whose tag and manifest version disagree.
       - name: Check tag matches manifest version
@@ -38,12 +38,18 @@ jobs:
             -x '*.DS_Store'
           unzip -l "auto-flow-cal-${GITHUB_REF_NAME}.zip"
 
-      - name: Publish release
+      - name: Prepare draft (publication requires operator approval)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # A tag created while publishing an existing draft must not edit that release.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release already exists; leave it unchanged."
+            exit 0
+          fi
           gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
+            --draft --latest=false \
+            --title "Auto Flow Calibration $GITHUB_REF_NAME" \
             --generate-notes \
             "auto-flow-cal-${GITHUB_REF_NAME}.zip"

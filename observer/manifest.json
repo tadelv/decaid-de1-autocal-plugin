@@ -1,0 +1,14 @@
+{
+  "id": "auto-flow-cal-observer.reaplugin",
+  "name": "Flow Calibration Observer",
+  "author": "Decent",
+  "description": "Experimental zero-lag final-step curve fitting. Observe only: never changes machine calibration.",
+  "version": "0.1.1",
+  "apiVersion": 1,
+  "permissions": ["log", "api", "pluginStorage", "events.shots"],
+  "settings": {},
+  "api": [
+    {"id": "status", "type": "http", "data": {}},
+    {"id": "ui", "type": "http", "data": {}}
+  ]
+}

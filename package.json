@@ -3,6 +3,10 @@
   "private": true,
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node --check auto-flow-cal.reaplugin/plugin.js"
+    "test:replay": "node --test test/real-shot.test.js",
+    "fit:offline": "node tools/experimental-flow-fit.js",
+    "build:observer": "node tools/build-observer.js",
+    "build": "node tools/build-plugin.js",
+    "check": "node --check src/plugin.js && node --check src/ui.js && node --check src/measurement-helpers.js && node --check auto-flow-cal.reaplugin/plugin.js && node tools/build-plugin.js --check"
   }
 }

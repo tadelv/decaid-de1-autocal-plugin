@@ -1,5 +1,7 @@
 # Streamline integration: where the applied calibration can show up
 
+**Implementation update:** **Auto Flow Calibration 2.0.0** consolidates the tested Brew `tile-line`, Manual/Auto overlay, Settings Open action and skin-only push updates under the original **`auto-flow-cal.reaplugin`** identity. Its original manifest now declares the required `emit`, machine-state and HTTP/WebSocket capabilities. The temporary 0.4.0 updater was a trial, not a new product; the operator requested its retirement. No old-settings migration is required. Manual matching remains exact-name per DE1; [issue #1](https://github.com/tadelv/decaid-de1-autocal-plugin/issues/1) tracks stronger identity. Real manual hardware testing and publication still require operator acceptance. See [current UI behavior](docs/UI.md) and [trial evidence](docs/trial-results.md). The research below describes the earlier 1.x integration.
+
 Research note on `decentespresso/streamline-js` at `d28da12` (v0.2.17 plus the
 `feat/shot-companion-plugin` merge). Read from the repo itself:
 

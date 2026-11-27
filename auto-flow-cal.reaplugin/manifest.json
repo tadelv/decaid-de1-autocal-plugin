@@ -1,65 +1,21 @@
 {
   "id": "auto-flow-cal.reaplugin",
-  "author": "Decent",
   "name": "Auto Flow Calibration",
-  "description": "Automatically calibrate DE1 flow from the two latest matching gravimetric shots",
-  "version": "1.4.0",
+  "author": "Decent",
+  "description": "Helps the machine’s flow estimate match your scale, with automatic calibration or a manual value for each profile. Supervise calibration changes.",
+  "version": "2.0.0",
   "apiVersion": 1,
-  "permissions": [
-    "log",
-    "api",
-    "pluginStorage",
-    "events.workflow",
-    "events.shots"
-  ],
+  "permissions": ["log", "api", "emit", "pluginStorage", "events.workflow", "events.shots", "events.machine"],
   "settings": {
-    "Enabled": {
-      "type": "boolean",
-      "label": "Automatic flow calibration",
-      "default": true,
-      "description": "Automatically calibrate DE1 flow from the two latest matching gravimetric shots."
-    },
-    "Damping": {
-      "type": "number",
-      "label": "Adjustment damping",
-      "default": 0.5,
-      "description": "Fraction of the calculated calibration error applied per profile evaluation."
-    },
-    "MaxAdjustment": {
-      "type": "number",
-      "label": "Maximum adjustment",
-      "default": 0.1,
-      "description": "Maximum multiplier change automatic calibration may apply in one evaluation."
-    },
-    "MinimumMultiplier": {
-      "type": "number",
-      "label": "Minimum multiplier",
-      "default": 0.35,
-      "description": "Lowest multiplier automatic calibration may use."
-    },
-    "MaximumMultiplier": {
-      "type": "number",
-      "label": "Maximum multiplier",
-      "default": 2.0,
-      "description": "Highest multiplier automatic calibration may use."
-    },
-    "DryRun": {
-      "type": "boolean",
-      "label": "Dry run",
-      "default": false,
-      "description": "Calculate and log decisions without changing DE1 calibration."
-    }
+    "Enabled": { "type": "boolean", "label": "Enable calibration changes", "default": false, "description": "Allow automatic and manual changes on the selected DE1. Wait for each update before starting another shot. Do not run the temporary updater plugin alongside this plugin." },
+    "ExpectedSerial": { "type": "string", "label": "DE1 serial number", "default": "", "description": "Only this machine can be calibrated. Leave blank to prevent changes." }
   },
   "api": [
-    {
-      "id": "status",
-      "type": "http",
-      "data": {}
-    },
-    {
-      "id": "ui",
-      "type": "http",
-      "data": {}
-    }
+    { "id": "status", "type": "http", "data": {} },
+    { "id": "skin", "type": "http", "data": {} },
+    { "id": "ui", "type": "http", "data": {} },
+    { "id": "view", "type": "http", "data": {} },
+    { "id": "mode", "type": "http", "data": {} },
+    { "id": "changed", "type": "websocket", "data": {} }
   ]
 }
