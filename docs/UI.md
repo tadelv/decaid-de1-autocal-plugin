@@ -2,6 +2,26 @@
 
 The Brew multiplier and Manual/Auto controls now belong to the **original `auto-flow-cal.reaplugin`**. The temporary `-updater` identity is retired as a product and has been removed from p85pro after the original-ID build was verified ready. The operator-approved install retained actual **0.835** calibration, checked the real read-only UI routes and left the old original state untouched. Version 2 consolidates the tested 0.4.0 behavior; it does not introduce a different estimator.
 
+## Screenshots
+
+These saved **M50Mini previews** show the layout and wording carried into 2.0.0. **Values are simulated**, not p85pro calibration readings or evidence of real manual writes. The preview labels are deliberately left visible.
+
+### Automatic mode and the Brew multiplier
+
+<img src="images/flow-calibration-auto.png" alt="M50Mini preview showing the multiplier under Brew and the automatic calibration overlay with simulated ×0.881" width="1000">
+
+### Manual mode — light and dark
+
+<table>
+  <tr><th>Light</th><th>Dark</th></tr>
+  <tr>
+    <td><img src="images/flow-calibration-manual-light.png" alt="Light-theme preview of Manual mode for Filter 3, using simulated ×2.000" width="420"></td>
+    <td><img src="images/flow-calibration-manual-dark.png" alt="Dark-theme preview of Manual mode for Filter 3, using simulated ×2.000" width="420"></td>
+  </tr>
+</table>
+
+Captured during the 2026-11-26 fixture validation. Overlay screenshots are cropped to the panel; the automatic view retains the dashboard to show the Brew entry point.
+
 ## Display and controls
 
 - Brew shows the last-read machine value, for example **×0.835**, or **M×0.835** in Manual. An unavailable value is `Cal —`, never a fitted estimate masquerading as the actual setting.
