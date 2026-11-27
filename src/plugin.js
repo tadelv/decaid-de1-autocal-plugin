@@ -176,7 +176,8 @@ function createPlugin(host) {
       if (result.changed) return serialized(function () { return activate(result.token); });
       if (pending && !retryQueued && Date.now() - lastRetry >= 500) {
         retryQueued = true; lastRetry = Date.now();
-        return serialized(apply).finally(function () { retryQueued = false; });
+        // An explicit wrapper: serialized work is handed its predecessor's fulfillment value, which is never a reading.
+        return serialized(function () { return apply(); }).finally(function () { retryQueued = false; });
       }
     });
   }
@@ -208,7 +209,9 @@ function createPlugin(host) {
   }
   async function check(s, token, p) {
     if (!alive(token) || s.key !== p.key || s.serial !== p.serial) {
-      pending = null; note('stale_context'); return false;
+      // Only the authorization this check was handed may be dropped: losing it must not erase a newer one.
+      if (pending === p) pending = null;
+      note('stale_context'); return false;
     }
     var m = record(s);
     if (m.expected !== s.value) {
@@ -217,13 +220,23 @@ function createPlugin(host) {
     }
     return true;
   }
-  async function apply() {
+  // The only reason a reading is left alone: a learning target closer than 0.010 to the value, or an exact target
+  // that already matches. Every other decision writes that target.
+  function noWrite(p, s) {
+    return p.kind === 'learning' ? Math.abs(Math.round(p.target * 1000) - Math.round(s.value * 1000)) < 10 : p.target === s.value;
+  }
+  // `initial` is only ever the reading an immediate activation planned a write from, paired with the authorization
+  // that activation installed. It is a per-invocation value; retries, shots and learning pass nothing and read fresh.
+  async function apply(initial) {
     var p = pending;
     if (!p || !alive(p.token)) return;
-    var s = await snapshot();
+    if (initial && initial.pending !== p) initial = null;
+    var s = initial ? initial.snapshot : await snapshot();
     if (!await check(s, p.token, p)) return;
+    // The check awaited: only the authorization captured here may exit early, stage an intent or be consumed.
+    if (!alive(p.token) || pending !== p) return;
     if (!s.safe) { note('deferred_busy', { shotId: p.shotId }); return; }
-    if (p.kind === 'learning' ? Math.abs(Math.round(p.target * 1000) - Math.round(s.value * 1000)) < 10 : p.target === s.value) {
+    if (noWrite(p, s)) {
       pending = null; note('no_write_needed', { target: p.target, current: s.value, kind: p.kind }); return;
     }
     var command = Math.round(p.target * 1000) / 1000;
@@ -300,12 +313,20 @@ function createPlugin(host) {
   }
   async function activate(token) {
     if (!alive(token)) return;
+    var original = activeKey, owned = pending;
     var s = await snapshot();
     if (!await check(s, token, { key: activeKey, serial: expectedSerial })) return;
+    // The check awaited: a controller or profile change since that reading must not install an authorization, and
+    // neither may a continuation whose authorization slot has since been taken by a newer one.
+    if (!alive(token) || activeKey !== original || s.key !== activeKey || pending !== owned) return;
     var m = record(s), saved = m.programs[s.key], manual = m.overrides[manualKey(s.title)];
-    pending = { token: token, serial: s.serial, key: s.key, target: manual !== undefined ? manual : saved && saved.applied !== null ? saved.applied : m.baseline,
+    var planned = { token: token, serial: s.serial, key: s.key,
+      target: manual !== undefined ? manual : saved && saved.applied !== null ? saved.applied : m.baseline,
       shotId: null, kind: manual !== undefined ? 'manual' : saved && saved.applied !== null ? 'recall' : 'baseline' };
-    await apply();
+    pending = planned;
+    // This reading is handed on only when it already plans a safe write. A busy or already-satisfied reading is
+    // read again and checked again before deciding, so a machine that moved on is still observed.
+    await apply(s.safe && !noWrite(planned, s) ? { pending: planned, snapshot: s } : undefined);
   }
   function json(request, code, body) {
     return { requestId: request.requestId, status: code, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }, body: JSON.stringify(body) };
@@ -561,7 +582,8 @@ function createPlugin(host) {
       }
       if (event.name === 'stateUpdate' && pending && !retryQueued && Date.now() - lastRetry >= 500) {
         retryQueued = true; lastRetry = Date.now();
-        return serialized(apply).finally(function () { retryQueued = false; });
+        // An explicit wrapper: serialized work is handed its predecessor's fulfillment value, which is never a reading.
+        return serialized(function () { return apply(); }).finally(function () { retryQueued = false; });
       }
     },
     __httpRequestHandler: function (request) {

@@ -15,6 +15,54 @@ function shot(id = 'new', multiplier = 1.45, second = 1, duration = 10) {
         scale: { timestamp: t, weight: 10 + 2 * multiplier * t, weightFlow: 2 * multiplier } };
     }) };
 }
+// Two test-only seams, inserted into a private copy of the generated source: a hook the plugin's own check() can be
+// paused at, and a handle on the functions it already has. They let a test interleave two continuations, which the
+// single serialized chain keeps apart in normal operation. Neither exists in src/plugin.js or in the built bundle.
+function instrumented(source) {
+  const patched = source
+    .replace("function createPlugin(host) {\n  'use strict';", "function createPlugin(host) {\n  'use strict';\n  var __seam = host.__seam || {};")
+    .replace('  async function check(s, token, p) {', '  async function check(s, token, p) {\n    if (__seam.check) await __seam.check(s, token, p);')
+    .replace('    var s = await snapshot();\n    if (!await check(s, token, { key: activeKey, serial: expectedSerial })) return;',
+      '    var s = await snapshot();\n    if (!await check(s, token, { key: activeKey, serial: expectedSerial })) return;\n    if (__seam.afterActivateCheck) await __seam.afterActivateCheck();')
+    .replace('    id: ID, version: VERSION,', '    id: ID, version: VERSION,\n    __internals: function () { return { activate: activate, apply: apply, serialized: serialized, pending: function () { return pending; }, generation: function () { return generation; } }; },');
+  assert.match(patched, /__seam\.check/); assert.match(patched, /afterActivateCheck/); assert.match(patched, /__internals/);
+  return patched;
+}
+
+// Pauses the first check the plugin runs after pause(), until release(), so a test can act in that window. Both
+// halves are bounded, and every test below releases in a finally, so a failing assertion can never leave a pending
+// promise behind and hang the runner.
+function seamedCheck() {
+  const gate = { armed: false, release: () => {} };
+  function bounded(name, arm) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('seam ' + name + ' was never reached')), 5000);
+      arm(() => { clearTimeout(timer); resolve(); });
+    });
+  }
+  gate.hook = async () => {
+    if (!gate.armed) return;
+    gate.armed = false; gate.signal();
+    await bounded('release', done => { gate.release = done; });
+  };
+  gate.pause = () => {
+    gate.armed = true;
+    gate.entered = bounded('pause', done => { gate.signal = done; });
+  };
+  return gate;
+}
+
+// A controlled clock for the retry throttle: the plugin's only time source is Date.now().
+function controlledClock(start = Date.parse('2026-11-26T12:00:00.000Z')) {
+  const clock = { now: start, tick(ms) { clock.now += ms; return clock.now; } };
+  class Clock extends Date {
+    constructor(...args) { if (args.length) super(...args); else super(clock.now); }
+    static now() { return clock.now; }
+  }
+  clock.Date = Clock;
+  return clock;
+}
+
 function harness(options = {}) {
   const calls = [], writes = [], posts = [];
   let plugin, stored = options.saved;
@@ -39,7 +87,7 @@ function harness(options = {}) {
     async store(id = 'new') { await plugin.onEvent({ name: 'shotStored', payload: { id } }); },
     async select(next) { h.workflow = { profile: structuredClone(next) }; await h.event('workflowUpdated', h.workflow); },
   };
-  const host = { log() {}, storage(command) {
+  const host = { log() {}, __seam: options.seam || null, storage(command) {
     assert.equal(command.namespace, 'auto-flow-cal.reaplugin');
     assert.equal(command.key, 'calibration-v2');
     calls.push({ storage: command.type });
@@ -56,7 +104,8 @@ function harness(options = {}) {
       if (h.ackHook) h.ackHook();
     });
   } };
-  plugin = vm.runInNewContext(payload.plugin + '\ncreatePlugin', {
+  plugin = vm.runInNewContext((options.seam ? instrumented(payload.plugin) : payload.plugin) + '\ncreatePlugin', {
+    ...(options.clock ? { Date: options.clock.Date } : {}),
     setTimeout: (fn, delay) => setTimeout(fn, options.ack === false || options.ackAt ? 5 : delay), clearTimeout,
     fetch: async (url, init = {}) => {
       calls.push({ url, method: init.method });
@@ -82,6 +131,23 @@ function harness(options = {}) {
   })(host);
   h.plugin = plugin;
   return h;
+}
+
+// Request accounting for the controller's own work: the four snapshot endpoints are what an activation or an
+// application evaluates. A caller's profile read, a history fence and shot inspection are not part of that count.
+const snapshotPaths = ['/machine/info', '/workflow', '/machine/state', '/machine/calibration'];
+function reads(h, from) {
+  return h.calls.slice(from).filter(c => c.url && c.method !== 'POST' && !new URL(c.url).pathname.endsWith('/shots'))
+    .map(c => new URL(c.url).pathname.replace('/api/v1', ''));
+}
+
+// A workflow event's own profile read is the caller's: activation's reads start immediately after it.
+async function markSwitch(h, next) {
+  let mark = null;
+  h.hook = u => { if (mark === null && u.pathname.endsWith('/workflow')) mark = h.calls.length; };
+  await h.select(next);
+  h.hook = null;
+  return mark;
 }
 
 async function legacyVerificationHold(options = {}) {
@@ -1655,3 +1721,328 @@ for (const name of ['short-output-tail', 'noisy-pressure-plateau', 'accepted-con
     assert.equal(result.fit.fitted, name !== 'missing-scale-control');
   });
 }
+
+// 2.0.3 read reuse: an immediate activation → application pair may hand its own reading to the first check, but
+// only when that reading already plans a safe write. Every other path keeps its fresh reads.
+test('a stable activation that applies a saved Manual reuses its reading: three snapshots instead of four, one POST', async () => {
+  const h = harness(); await h.start(); await h.mode('manual', 2);
+  await h.select({ ...profile, title: 'Other program' }); // baseline fallback leaves the machine at 1.130
+  const posted = h.posts.length, written = h.writes.length;
+  const mark = await markSwitch(h, profile);
+  // The initial reuse, the pre-command read and the read-back verification are the only snapshots it evaluates.
+  assert.deepEqual(reads(h, mark), [...snapshotPaths, ...snapshotPaths, ...snapshotPaths]);
+  assert.equal(h.posts.length, posted + 1); assert.equal(h.posts.at(-1).flowMultiplier, 2);
+  // Intent durability and the verified record keep their exact order: acknowledged intent first, record afterwards.
+  const attempted = h.writes.slice(written);
+  assert.equal(attempted.length, 2);
+  assert.deepEqual(attempted[0].pending, { serial, model: 'DE1Pro', key: h.status().profile.key, shotId: null, expected: 1.13, command: 2, kind: 'manual' });
+  assert.equal(attempted[1].pending, null);
+  const record = h.stored().machines['s:' + serial];
+  assert.equal(record.expected, 2); assert.equal(record.overrides['t:Trial'], 2);
+  assert.equal(h.current, 2); assert.equal(h.status().profile.manualValue, 2); assert.equal(h.status().held, null);
+  assert.equal(h.status().decisions[0].reason, 'applied_verified');
+});
+
+test('baseline fallback and exact recall activations also evaluate three snapshots and write once each', async () => {
+  const h = harness(); await h.start(); await h.store(); // learning write leaves the machine at 1.450
+  const applied = h.current, posted = h.posts.length;
+  const baseline = await markSwitch(h, { ...profile, title: 'Other program' });
+  assert.deepEqual(reads(h, baseline), [...snapshotPaths, ...snapshotPaths, ...snapshotPaths]);
+  assert.equal(h.current, 1.13); // the never-learned program falls back to the machine baseline
+  const recall = await markSwitch(h, profile);
+  assert.deepEqual(reads(h, recall), [...snapshotPaths, ...snapshotPaths, ...snapshotPaths]);
+  assert.equal(h.current, applied); // its own verified value is recalled, never the baseline
+  assert.deepEqual(h.posts.slice(posted).map(p => p.flowMultiplier), [1.13, 1.45]);
+});
+
+test('a busy or already-satisfied activation still re-reads before deciding and sends nothing', async () => {
+  const h = harness(); await h.start(); await h.mode('manual', 2);
+  await h.select({ ...profile, title: 'Other program' }); await h.mode('manual', 2); // both profiles 2.000, machine 2.000
+  const posted = h.posts.length;
+  // Nothing to write: the fresh second reading is still taken, so the no-write decision is never based on one read.
+  let mark = await markSwitch(h, profile);
+  assert.deepEqual(reads(h, mark), [...snapshotPaths, ...snapshotPaths]);
+  assert.equal(h.posts.length, posted); assert.equal(h.status().pending, null);
+  assert.equal(h.status().decisions[0].reason, 'no_write_needed');
+  // Busy: also re-read, and only the authorization is kept for a later safe moment.
+  h.state = 'espresso';
+  mark = await markSwitch(h, { ...profile, title: 'Other program' });
+  assert.deepEqual(reads(h, mark), [...snapshotPaths, ...snapshotPaths]);
+  assert.equal(h.posts.length, posted); assert.ok(h.status().pending);
+  assert.equal(h.status().decisions[0].reason, 'deferred_busy');
+  h.state = 'idle';
+  mark = h.calls.length; await h.event('stateUpdate', {});
+  assert.equal(reads(h, mark).length, 4); // the equal target needs no command after the deferral either
+  assert.equal(h.posts.length, posted); assert.equal(h.status().pending, null);
+});
+
+test('a busy prediction is re-read: a machine that goes idle in that window still writes exactly once', async () => {
+  const h = harness(); await h.start(); await h.mode('manual', 2);
+  await h.select({ ...profile, title: 'Other program' }); // machine 1.130
+  const posted = h.posts.length;
+  h.state = 'espresso';
+  let mark = null, states = 0;
+  h.hook = u => {
+    if (mark === null && u.pathname.endsWith('/workflow')) { mark = h.calls.length; return; }
+    // The second state read is the fresh second look: the machine is idle by then and no idle event was delivered.
+    if (u.pathname.endsWith('/machine/state') && ++states === 2) h.state = 'idle';
+  };
+  await h.select(profile);
+  h.hook = null; // the prediction was busy, so this fallback legitimately keeps all four snapshots
+  assert.deepEqual(reads(h, mark), [...snapshotPaths, ...snapshotPaths, ...snapshotPaths, ...snapshotPaths]);
+  assert.equal(h.posts.length, posted + 1); assert.equal(h.posts.at(-1).flowMultiplier, 2); assert.equal(h.current, 2);
+});
+
+test('the fresh fallback observes value, profile and machine drift that a single reused reading would miss', async () => {
+  // Both profiles are 2.000 and the machine reads 2.000, so the activation's reading predicts no write and the
+  // second, fresh reading decides. Each change below lands before that second reading answers.
+  async function switched(driftPath, mutate) {
+    const h = harness(); await h.start(); await h.mode('manual', 2);
+    await h.select({ ...profile, title: 'Other program' }); await h.mode('manual', 2);
+    const posted = h.posts.length, before = JSON.stringify(h.stored());
+    let mark = null, seen = 0;
+    h.hook = u => {
+      if (mark === null) { if (u.pathname.endsWith('/workflow')) mark = h.calls.length; return; }
+      if (u.pathname.endsWith(driftPath) && ++seen === 2) mutate(h);
+    };
+    await h.select(profile);
+    h.hook = null;
+    return { h, reads: reads(h, mark), posted, before };
+  }
+  const value = await switched('/machine/calibration', h => { h.current = 1.5; });
+  assert.equal(value.reads.length, 8); assert.equal(value.h.posts.length, value.posted);
+  assert.equal(value.h.status().held, 'external_change_detected');
+  assert.equal(value.h.stored().machines['s:' + serial].expected, 2, 'the changed reading is never written back');
+  assert.equal(JSON.stringify(value.h.stored().machines), JSON.stringify(JSON.parse(value.before).machines));
+  const switchedProfile = await switched('/workflow', h => { h.workflow = { profile: { ...profile, title: 'Changed' } }; });
+  assert.equal(switchedProfile.reads.length, 8); assert.equal(switchedProfile.h.posts.length, switchedProfile.posted);
+  assert.equal(switchedProfile.h.status().pending, null); assert.equal(switchedProfile.h.status().held, null);
+  assert.equal(switchedProfile.h.status().decisions[0].reason, 'stale_context');
+  assert.equal(JSON.stringify(switchedProfile.h.stored()), switchedProfile.before);
+  const machine = await switched('/machine/info', h => { h.machine.model = 'DE1Plus'; });
+  assert.deepEqual(machine.reads, [...snapshotPaths, '/machine/info'], 'the changed model is rejected on the re-read');
+  assert.equal(machine.h.posts.length, machine.posted); assert.equal(machine.h.status().held, 'wrong_machine');
+  assert.equal(JSON.stringify(machine.h.stored()), machine.before);
+});
+
+test('learning keeps its own fresh reads and the exact 0.010 deadband boundary', async () => {
+  const input = shot('new', 1.14), fit = fitFlowZeroLag(input), fitted = Math.round(fit.multiplier * 1000);
+  assert.equal(fit.fitted, true);
+  // Exactly 0.010 away is still a write; the learning path never receives an activation reading.
+  const at = harness({ shots: [structuredClone(input)] });
+  at.current = (fitted - 10) / 1000; await at.start();
+  let mark = at.calls.length; await at.store();
+  assert.deepEqual(at.status().decisions.find(d => d.reason === 'new_target').fit, fit);
+  assert.equal(reads(at, mark).length, 12); assert.equal(at.posts.length, 1);
+  assert.equal(at.posts[0].flowMultiplier, fitted / 1000); assert.equal(at.status().decisions[0].reason, 'applied_verified');
+  // 0.009 away keeps the machine as it is after a single read.
+  const below = harness({ shots: [structuredClone(input)] });
+  below.current = (fitted - 9) / 1000; await below.start();
+  mark = below.calls.length; await below.store();
+  assert.equal(reads(below, mark).length, 4); assert.equal(below.posts.length, 0);
+  assert.equal(below.status().decisions[0].reason, 'no_write_needed');
+  assert.equal(below.status().decisions[0].current, (fitted - 9) / 1000);
+});
+
+test('deferred retries read fresh: four reads while still busy, twelve when they can write, duplicates send nothing', async () => {
+  const busy = harness(); await busy.start(); busy.state = 'espresso'; await busy.store();
+  assert.equal(busy.posts.length, 0); assert.ok(busy.status().pending);
+  let mark = busy.calls.length; await busy.event('stateUpdate', {});
+  assert.equal(reads(busy, mark).length, 4); assert.equal(busy.posts.length, 0);
+  mark = busy.calls.length; await busy.event('stateUpdate', {}); // throttled duplicate
+  assert.equal(reads(busy, mark).length, 0);
+  const h = harness(); await h.start(); h.state = 'espresso'; await h.store();
+  h.state = 'idle';
+  mark = h.calls.length; await h.event('stateUpdate', {});
+  assert.equal(reads(h, mark).length, 12); assert.deepEqual(h.posts.map(p => p.flowMultiplier), [1.45]);
+  mark = h.calls.length;
+  await h.event('stateUpdate', {}); await h.event('workflowUpdated', h.workflow);
+  assert.equal(h.posts.length, 1); assert.deepEqual(reads(h, mark), ['/workflow'], 'only the event\'s own read');
+});
+
+test('an activation whose controller unloads during its reading installs no authorization and sends nothing', async () => {
+  const h = harness(); await h.start(); await h.mode('manual', 2);
+  await h.select({ ...profile, title: 'Other program' }); // machine 1.130
+  const posted = h.posts.length, written = h.writes.length;
+  h.hook = u => { if (u.pathname.endsWith('/machine/calibration')) { h.hook = null; h.plugin.onUnload(); } };
+  await h.select(profile); // would recall 2.000
+  assert.equal(h.posts.length, posted); assert.equal(h.writes.length, written);
+  assert.equal(h.status().pending, null); assert.equal(h.status().stopped, true);
+});
+
+test('an explicit Auto start keeps its own three fresh reads, one history fence and zero commands', async () => {
+  const h = harness(); await h.start(); await h.mode('manual', 2);
+  h.current = 1;
+  const posted = h.posts.length;
+  const mark = h.calls.length, response = await h.mode('auto');
+  assert.equal(response.status, 200); assert.equal(h.posts.length, posted);
+  assert.deepEqual(reads(h, mark), [...snapshotPaths, ...snapshotPaths, ...snapshotPaths]);
+  assert.equal(h.calls.slice(mark).filter(c => c.url && c.url.includes('/shots')).length, 1, 'one history fence');
+  const record = h.stored().machines['s:' + serial];
+  assert.equal(record.expected, 1); assert.deepEqual(record.programs[h.status().profile.key], { target: 1, applied: 1 });
+  assert.deepEqual(record.manual, { 't:Trial': 2 });
+});
+
+// 2.0.3 authorization ownership: an awaited check is an ownership boundary. A continuation that loses its
+// authorization — by losing the generation, or because a newer authorization took the slot — must neither install
+// its own plan nor erase the newer one. The seams only pause the plugin's own check; every decision, read and write
+// is made by the compiled functions themselves.
+test('a stale continuation drops only its own authorization and never erases a newer one', { timeout: 15000 }, async () => {
+  // Trial learns 1.450 from a shot; Other carries a saved Manual 1.500, so leaving to it plans a real write.
+  const gate = seamedCheck();
+  const h = harness({ seam: { check: gate.hook } }); await h.start();
+  await h.store(); // Trial learns and applies 1.450
+  await h.select({ ...profile, title: 'Other program' }); // the baseline fallback writes 1.130 back
+  await h.mode('manual', 1.5); // Other keeps Manual 1.500
+  await h.select(profile); // Trial recalls 1.450
+  h.state = 'espresso'; h.shots.push(shot('second', 1.7, 2)); await h.store('second'); // a busy machine keeps the 1.700 learning plan
+  const internals = h.plugin.__internals();
+  assert.equal(internals.pending().kind, 'learning');
+  const posted = h.posts.length;
+  let stale;
+  try {
+    gate.pause(); stale = internals.apply(); await gate.entered; // the older continuation, paused in its own check
+    await h.select({ ...profile, title: 'Other program' }); // the generation moves on and installs its own plan
+  } finally { gate.release(); await stale; }
+  const newer = h.status().pending;
+  assert.ok(newer, 'the newer authorization survives a stale check');
+  assert.equal(newer.kind, 'manual'); assert.equal(newer.target, 1.5);
+  assert.equal(h.status().decisions[0].reason, 'stale_context');
+  assert.equal(h.posts.length, posted); assert.equal(h.current, 1.45);
+});
+
+test('an activation that loses the authorization slot installs nothing and leaves the newer plan intact', { timeout: 15000 }, async () => {
+  const gate = seamedCheck();
+  const h = harness({ seam: { check: gate.hook } }); await h.start();
+  await h.store(); // Trial learns and applies 1.450, so a later activation plans a recall of it
+  h.state = 'espresso';
+  const internals = h.plugin.__internals();
+  let activation;
+  try {
+    gate.pause(); activation = internals.activate(internals.generation()); await gate.entered;
+    h.shots.push(shot('second', 1.7, 2)); await h.store('second'); // a new shot installs its own authorization
+  } finally { gate.release(); await activation; }
+  const newer = h.status().pending;
+  assert.ok(newer, 'the newer authorization is not replaced');
+  assert.equal(newer.kind, 'learning'); assert.equal(newer.shotId, 'second');
+  assert.equal(h.posts.length, 1); // only the learning write that preceded the window
+  // The authorization that was kept is the one that eventually writes: once, to its own target.
+  h.state = 'idle'; const mark = h.calls.length; await h.event('stateUpdate', {});
+  assert.equal(reads(h, mark).length, 12); assert.equal(h.posts.length, 2);
+  assert.equal(h.posts.at(-1).flowMultiplier, Math.round(newer.target * 1000) / 1000);
+  assert.equal(h.status().pending, null);
+});
+
+test('an application that loses the authorization slot neither consumes nor stages the newer plan', { timeout: 15000 }, async () => {
+  const gate = seamedCheck();
+  const h = harness({ seam: { check: gate.hook } }); await h.start();
+  h.state = 'espresso'; h.shots.push(shot('second', 1.7, 2)); await h.store('second'); // deferred learning plan
+  const internals = h.plugin.__internals();
+  assert.equal(internals.pending().shotId, 'second');
+  h.state = 'idle'; // idle again, but nothing re-runs the deferred plan without an event
+  let written, stale;
+  try {
+    gate.pause(); stale = internals.apply(); await gate.entered; // a fresh application, paused inside its own check
+    h.state = 'espresso'; h.shots.push(shot('third', 1.9, 3)); await h.store('third'); // a newer plan takes the slot
+    written = h.writes.length; // after the newer plan landed, before the older continuation resumes
+  } finally { gate.release(); await stale; }
+  const kept = h.status().pending;
+  assert.ok(kept, 'the newer plan is not consumed by the older application');
+  assert.equal(kept.shotId, 'third');
+  assert.equal(h.writes.length, written, 'the older application stages no intent');
+  assert.equal(h.stored().pending, null, 'no durable intent was left behind');
+  assert.equal(h.posts.length, 0);
+});
+
+test('a profile left and re-entered while a continuation awaits its check never revives the older authority', { timeout: 15000 }, async () => {
+  const gate = seamedCheck();
+  const h = harness({ seam: { check: gate.hook } }); await h.start();
+  await h.mode('manual', 2); // Trial keeps Manual 2.000
+  await h.select({ ...profile, title: 'Other program' }); // the baseline fallback writes 1.130
+  h.state = 'espresso';
+  await h.select(profile); // Trial's recall of 2.000 is deferred by the busy machine
+  const posted = h.posts.length;
+  const internals = h.plugin.__internals();
+  assert.equal(internals.pending().kind, 'manual');
+  let stale;
+  try {
+    gate.pause(); stale = internals.apply(); await gate.entered;
+    await h.select({ ...profile, title: 'Other program' }); // leaving Trial
+    await h.select(profile); // and returning to it installs a fresh plan
+  } finally { gate.release(); await stale; }
+  const newest = h.status().pending;
+  assert.ok(newest, 'the re-entered profile keeps its own authorization');
+  assert.equal(newest.kind, 'manual'); assert.equal(newest.target, 2);
+  assert.equal(h.status().decisions[0].reason, 'stale_context');
+  h.state = 'idle';
+  const mark = h.calls.length; await h.event('stateUpdate', {});
+  // One write, the returning plan's 2.000: a revived older plan would carry a dead token and grant nothing here.
+  assert.deepEqual(h.posts.slice(posted).map(p => p.flowMultiplier), [2]);
+  assert.equal(reads(h, mark).length, 12); assert.equal(h.status().pending, null);
+});
+
+test('an activation unloaded after its awaited check installs no authorization and sends nothing', { timeout: 15000 }, async () => {
+  const gate = seamedCheck();
+  const h = harness({ seam: { afterActivateCheck: gate.hook } }); await h.start(); await h.mode('manual', 2);
+  await h.select({ ...profile, title: 'Other program' }); // the machine is at 1.130, Trial still remembers Manual 2.000
+  const posted = h.posts.length, written = h.writes.length;
+  let switched;
+  try {
+    gate.pause(); switched = h.select(profile); await gate.entered; // the check passes, then the controller unloads
+    h.plugin.onUnload();
+  } finally { gate.release(); await switched; }
+  assert.equal(h.status().stopped, true); assert.equal(h.status().pending, null);
+  assert.equal(h.posts.length, posted); assert.equal(h.writes.length, written);
+});
+
+// OP2/OP4: both deferred retry callers are throttled by the controller clock, read fresh, and never mistake a
+// serialized predecessor's fulfillment value for a reading.
+test('both deferred retry callers keep the pinned 500ms throttle and their own fresh reads', { timeout: 15000 }, async () => {
+  const clock = controlledClock();
+  const h = harness({ clock }); await h.start(); h.state = 'espresso'; await h.store();
+  assert.ok(h.status().pending);
+  let mark = h.calls.length; await h.event('stateUpdate', {});
+  assert.equal(reads(h, mark).length, 4); // one fresh snapshot, still busy: nothing to send
+  clock.tick(499);
+  mark = h.calls.length; await h.event('stateUpdate', {});
+  assert.equal(reads(h, mark).length, 0, 'below the boundary the duplicate is throttled');
+  mark = h.calls.length; await h.event('workflowUpdated', h.workflow);
+  assert.deepEqual(reads(h, mark), ['/workflow'], 'the workflow caller is throttled too and only reads its profile');
+  clock.tick(1);
+  mark = h.calls.length; await h.event('workflowUpdated', h.workflow);
+  assert.deepEqual(reads(h, mark), ['/workflow', ...snapshotPaths], 'exactly at the boundary the workflow retry reads fresh');
+  clock.tick(499);
+  mark = h.calls.length; await h.event('stateUpdate', {});
+  assert.equal(reads(h, mark).length, 0);
+  // At the boundary again, now idle: its own three snapshots, one command.
+  h.state = 'idle'; clock.tick(1);
+  mark = h.calls.length; await h.event('stateUpdate', {});
+  assert.equal(reads(h, mark).length, 12); assert.equal(h.posts.length, 1);
+});
+
+test('neither retry caller trusts a serialized predecessor value as its reading', { timeout: 15000 }, async () => {
+  // `serialized` hands a work function its predecessor's fulfillment value. No current product path resolves with
+  // one, so the decoy below is the worst case: it carries the live authorization itself and a plausible idle
+  // reading of the value the record already expects. Only the explicit zero-argument wrapper keeps it out.
+  async function retried(trigger) {
+    const h = harness({ seam: {} }); await h.start();
+    h.state = 'espresso'; await h.store();
+    const internals = h.plugin.__internals(), p = internals.pending();
+    assert.equal(p.kind, 'learning');
+    const decoy = { pending: p, snapshot: { key: p.key, serial: p.serial, model: 'DE1Pro', state: 'idle', safe: true, value: 1.13 } };
+    await internals.serialized(function () { return decoy; }); // the chain now resolves with the decoy
+    const mark = h.calls.length, written = h.writes.length;
+    await trigger(h);
+    return { h, internals, p, mark, written };
+  }
+  const state = await retried(h => h.event('stateUpdate', {}));
+  assert.equal(reads(state.h, state.mark).length, 4, 'the retry reads the machine instead of using the decoy');
+  assert.equal(state.h.writes.length, state.written, 'nothing is staged from the decoy');
+  assert.equal(state.h.status().decisions[0].reason, 'deferred_busy');
+  assert.equal(state.internals.pending(), state.p, 'the authorization is neither consumed nor replaced');
+  const workflow = await retried(h => h.event('workflowUpdated', h.workflow));
+  assert.deepEqual(reads(workflow.h, workflow.mark), ['/workflow', ...snapshotPaths]);
+  assert.equal(workflow.h.writes.length, workflow.written);
+  assert.equal(workflow.h.status().decisions[0].reason, 'deferred_busy');
+  assert.equal(workflow.internals.pending(), workflow.p);
+});
