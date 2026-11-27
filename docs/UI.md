@@ -1,6 +1,6 @@
-# Auto Flow Calibration UI — 2.0.1
+# Auto Flow Calibration UI — 2.0.2
 
-The Brew multiplier and Manual/Auto controls now belong to the **original `auto-flow-cal.reaplugin`**. The temporary `-updater` identity is retired as a product and has been removed from p85pro after the original-ID build was verified ready. The operator-approved install retained actual **0.835** calibration, checked the real read-only UI routes and left the old original state untouched. Version 2 consolidates the tested 0.4.0 behavior; it does not introduce a different estimator.
+The Brew multiplier and Manual/Auto controls belong to the **original `auto-flow-cal.reaplugin`**. The temporary `-updater` identity is retired as a product and has been removed from p85pro after the original-ID build was verified ready. The operator-approved install retained actual **0.835** calibration, checked the real read-only UI routes and left the old original state untouched. Version 2 consolidates the tested 0.4.0 behavior; it does not introduce a different estimator.
 
 ## Screenshots
 
@@ -30,17 +30,20 @@ Captured during the 2026-11-26 fixture validation. Overlay screenshots are cropp
 - Use manual accepts 0.350–2.000 at three-decimal resolution. Auto restores the current recipe's verified automatic value or starting baseline, then uses only subsequent usable shots.
 - Controls require master enable, an exact serial pin, a ready controller, fresh identity/context, between-shot state and successful persistence. Stale drafts or ambiguous requests require Check again; no silent retry.
 
-The HTTP endpoints are `status`, `skin`, `ui`, `view`, `mode` and `recover`. The `changed` WebSocket invalidates only the skin. The original manifest declares these endpoints and `emit`/`events.machine`; endpoint declarations are not optional under Decaid's routing rules. Read-only endpoints reject mutation attempts. Explicit POST `mode` changes a selection; POST `recover` adopts a reviewed matching value as a new Manual choice without sending it to the machine.
+The HTTP endpoints are `status`, `skin`, `ui`, `view`, `mode` and `recover`. The `changed` WebSocket invalidates only the skin. The original manifest declares these endpoints and `emit`/`events.machine`; endpoint declarations are not optional under Decaid's routing rules. Read-only endpoints reject mutation attempts. Explicit POST `mode` changes a selection; POST `recover` adopts a reviewed current value in the profile's own mode without sending it to the machine.
 
-## Reviewing a paused change in 2.0.1
+## Reviewing a paused change in 2.0.2
 
-**Check again** now reviews the current workflow, target, state and saved intent while calibration is paused. It never clears the hold or resends a calibration command by itself. The profile shown follows Decaid's current workflow, even while held.
+**Check again** reviews the current workflow, target, state and saved request while calibration is paused. It never clears the pause or resends a calibration command by itself. The profile shown follows Decaid's current workflow, even while paused.
 
-If the supported pinned machine is idle and both profile and value match the paused change, a recovery panel appears. Independently check that the previous operation has finished, tick the confirmation and choose **Keep ×… in Manual**. This creates an explicit Manual choice using the value already read on the machine, preserves other profiles and records the old intent for audit. No calibration POST is issued. Return to Auto later only as an explicit choice.
+If the supported pinned machine is idle and the profile matches the paused request, a recovery panel appears. It shows the profile's mode, the multiplier that was requested and the value the machine reports now; those two values may differ. There is no free-form target field — recovery can only accept the freshly read value. After independently checking that the previous operation has finished, tick the confirmation and tap the button, which names both the value and the mode it keeps:
 
-If the machine/profile/value is different, the machine is busy, or the old operation may still be pending, leave it paused. Do not delete saved state or blindly retry. Changing profile, connection, value or context invalidates the review; a failed response is not automatically retried. **More details → Verification checks** shows the checks that failed when available. Old 2.0.0 intents can be reviewed even without those newer diagnostics.
+- **Keep ×1.000 in Automatic** — an Auto profile stays Auto. ×1.000 becomes that profile's new starting point and the expected machine value. No calibration command is sent, the old requested value is not recalled, and the earlier attempt is not marked verified. Only a genuinely new shot can teach Auto again; a pre-recovery shot delivered late is ignored, including when no earlier history exists.
+- **Keep ×1.000 in Manual** — a Manual profile stays Manual. Its saved manual value becomes ×1.000 and its automatic record is retained for a later explicit Auto.
 
-The historical previews above do not show this new panel. [Full recovery procedure and limitations](RELEASE-2.0.1.md).
+The change is recorded as an operator-authorized reload with the prior request and the replaced profile record for audit. Other profiles (for example D-Flow in Manual ×1.000), baselines and histories are preserved; the ledger is not reset. Changing profile, connection, value, mode, state, the paused request or context invalidates the review, and a value that later returns to the reviewed number does not restore the earlier confirmation — tap **Check again** to review the current state again. A failed response is not automatically retried. **More details → Verification checks** shows the checks that failed when available. Old 2.0.0 intents can be reviewed even without those newer diagnostics.
+
+The operator confirmation is supervised policy, not proof that the host queue is empty: clearing the paused record cannot cancel a command already sent. If you cannot establish that the previous operation finished, leave the plugin disabled. The historical previews above do not show this panel. [Full recovery procedure and limitations](RELEASE-2.0.2.md).
 
 ## Profile matching
 
@@ -63,6 +66,8 @@ The temporary 0.4.0 implementation passed controller/browser regressions and nat
 **Accepted keyboard issue:** closing Android's keyboard can leave the overlay too small until it is scrolled. The operator accepted scrolling as a workaround for the first version; this task does not claim a resize fix.
 
 Current regression tests exercise the compiled original-ID bundle, parser contract, escaped/untrusted text, framing-origin extraction, failed reads, stale context, explicit Manual/Auto requests, polling cleanup, decimal validation, duplicate prevention and storage failures. With `STREAMLINE_SOURCE` supplied, the actual Streamline parser is also tested; CI explicitly skips that optional case without the checkout.
+
+**2.0.2 recovery is validated by automated tests only.** The compiled controller and the generated page client are exercised together with a simulated DOM, transport and storage, including zero calibration commands during recovery, mode preservation across reload and delayed-shot rejection. No tablet, phone, emulator, DE1, scale, Bluetooth, firmware or native-storage check was performed for this change, and no hardware result is claimed. [2.0.2 release notes](RELEASE-2.0.2.md).
 
 The operator accepted the p85pro UI, reported a successful normal shot and approved release on 2026-11-27. Read-only inspection verified Auto processing and a correct no-change result inside the deadband. Real manual hardware writes and real-device Manual/profile-switch/restart behavior have not been independently confirmed; regression/fixture coverage does not establish those hardware results. The [release notes](RELEASE-2.0.0.md) record the test scope and known limits.
 

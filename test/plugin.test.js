@@ -50,10 +50,10 @@ function harness(options = {}) {
     h.storageAttempts++;
     if (h.failStorage || h.storageAttempts === h.failStorageAt) throw new Error('disk failure');
     stored = structuredClone(command.data); writes.push(stored);
-    if (options.ack !== false) queueMicrotask(() => plugin.onEvent({ name: 'storageWrite', payload: structuredClone(stored) }));
+    if (options.ack !== false && options.ackAt !== h.storageAttempts) queueMicrotask(() => plugin.onEvent({ name: 'storageWrite', payload: structuredClone(stored) }));
   } };
   plugin = vm.runInNewContext(payload.plugin + '\ncreatePlugin', {
-    setTimeout: (fn, delay) => setTimeout(fn, options.ack === false ? 5 : delay), clearTimeout,
+    setTimeout: (fn, delay) => setTimeout(fn, options.ack === false || options.ackAt ? 5 : delay), clearTimeout,
     fetch: async (url, init = {}) => {
       calls.push({ url, method: init.method });
       const u = new URL(url);
@@ -94,6 +94,21 @@ async function legacyVerificationHold(options = {}) {
 
 function recoveryBody(review) {
   return { context: review.context, profileKey: review.profileKey, value: review.value, confirmSettled: true };
+}
+
+// Reported state: the paused command was 2.000 but the machine now reads 1.000.
+async function reloadHold(mode = 'auto', options = {}) {
+  const filter = { title: 'Filter3', version: '1', steps: [{ name: 'pour', flow: 2 }] };
+  const dflow = { title: 'D-Flow / Step-down', version: '1', steps: [{ name: 'pour', pressure: 6 }] };
+  const seed = harness(); seed.current = 2; seed.workflow = { profile: structuredClone(filter) }; await seed.start();
+  const filterKey = seed.status().profile.key;
+  await seed.select(dflow); await seed.mode('manual', 1);
+  if (mode === 'manual') { await seed.select(filter); await seed.mode('manual', 2); }
+  const saved = seed.stored(), record = saved.machines['s:' + serial];
+  record.programs[filterKey] = mode === 'manual' ? { target: 1.35, applied: 1.13 } : { target: 2, applied: 2 };
+  saved.pending = { serial, model: 'DE1Pro', key: filterKey, shotId: null, expected: 2, command: 2, kind: 'learning' };
+  const h = harness({ ...options, saved }); h.current = 1; h.workflow = { profile: structuredClone(filter) }; await h.start();
+  return { h, filter, dflow, filterKey };
 }
 
 test('late workflow events during a verified write cannot replace the authoritative active profile', async () => {
@@ -212,6 +227,348 @@ test('verification diagnostics distinguish a value mismatch and a newly busy mac
   const busy = harness(); await busy.start(); busy.hook = (u, init) => { if (init.method === 'POST') busy.state = 'espresso'; };
   await busy.store(); assert.deepEqual(busy.status().verificationFailure.reasons, ['machine_busy']);
   assert.equal(busy.status().verificationFailure.observed.state, 'espresso');
+});
+
+test('Check again reviews the differing readback without touching state and offers a mode-preserving reload', async () => {
+  const { h, dflow } = await reloadHold('auto'), before = h.stored(), writes = h.writes.length, posts = h.posts.length;
+  const model = await h.view();
+  assert.equal(model.profile.mode, 'auto'); assert.equal(model.canSetMode, false);
+  assert.equal(model.recovery.available, true); assert.equal(model.recovery.action, 'reload_current');
+  assert.equal(model.recovery.mode, 'auto'); assert.equal(model.recovery.command, 2); assert.equal(model.recovery.value, 1);
+  assert.equal(model.recovery.requiresSettledConfirmation, true);
+  assert.match(model.recoveryText, /Automatic/);
+  assert.match(model.recoveryText, /×2\.000/); assert.match(model.recoveryText, /×1\.000/);
+  assert.deepEqual(h.stored(), before); assert.equal(h.writes.length, writes);
+  assert.equal(h.posts.length, posts); assert.ok(h.status().held); assert.ok(h.status().unresolvedIntent);
+  assert.deepEqual(Object.keys(h.stored().machines['s:' + serial].overrides), ['t:' + dflow.title]);
+});
+
+test('an Auto reload keeps Automatic, rebases only that profile and never sends a calibration command', async () => {
+  const { h, dflow, filterKey } = await reloadHold('auto'), posted = h.posts.length;
+  const review = (await h.view()).recovery;
+  const response = await h.recover({ ...recoveryBody(review), action: 'reload_current' }), body = JSON.parse(response.body);
+  assert.equal(response.status, 200); assert.equal(body.saved, true);
+  assert.equal(body.mode, 'auto'); assert.equal(body.value, 1); assert.equal(body.calibrationCommandSent, false);
+  assert.equal(h.status().held, null); assert.equal(h.status().ready, true); assert.equal(h.status().unresolvedIntent, null);
+  assert.equal(h.status().profile.mode, 'auto'); assert.equal(h.status().profile.manualValue, null);
+  assert.equal(h.posts.length, posted); assert.equal(h.current, 1);
+  const m = h.stored().machines['s:' + serial];
+  assert.equal(m.expected, 1); assert.equal(m.overrides['t:' + dflow.title], 1);
+  assert.equal(Object.prototype.hasOwnProperty.call(m.overrides, 't:Filter3'), false, 'Auto must not become Manual');
+  assert.deepEqual(m.programs[filterKey], { target: 1, applied: 1 }, 'the checked value is the new starting point');
+  const audit = h.stored().lastRecovery;
+  assert.equal(audit.authority, 'operator_confirmed_reload_current'); assert.equal(audit.mode, 'auto');
+  assert.equal(audit.value, 1); assert.equal(audit.command, 2); assert.equal(audit.calibrationCommandSent, false);
+  assert.deepEqual(audit.previous.program, { target: 2, applied: 2 }, 'the replaced profile record is retained');
+  assert.equal(audit.previousIntent.command, 2);
+  assert.ok(!h.status().decisions.some(d => d.reason === 'applied_verified'), 'the old command is not called verified');
+  assert.equal((await h.recover({ ...recoveryBody(review), action: 'reload_current' })).status, 409);
+});
+
+test('a Manual reload keeps Manual, replaces its saved value and preserves the automatic record', async () => {
+  const { h, dflow, filterKey } = await reloadHold('manual'), before = h.stored().machines['s:' + serial], posted = h.posts.length;
+  const model = await h.view();
+  assert.equal(model.profile.mode, 'manual'); assert.equal(model.recovery.mode, 'manual');
+  assert.match(model.recoveryText, /Manual/);
+  const response = await h.recover({ ...recoveryBody(model.recovery), action: 'reload_current' }), body = JSON.parse(response.body);
+  assert.equal(response.status, 200); assert.equal(body.mode, 'manual'); assert.equal(body.value, 1);
+  assert.equal(h.status().held, null); assert.equal(h.status().profile.mode, 'manual');
+  assert.equal(h.status().profile.manualValue, 1); assert.equal(h.posts.length, posted);
+  const m = h.stored().machines['s:' + serial];
+  assert.equal(m.expected, 1); assert.equal(m.overrides['t:Filter3'], 1);
+  assert.deepEqual(m.programs, before.programs, 'the automatic record survives for a later explicit Auto');
+  assert.deepEqual(m.programs[filterKey], { target: 1.35, applied: 1.13 });
+  assert.equal(m.overrides['t:' + dflow.title], 1); assert.equal(m.baseline, before.baseline);
+  assert.deepEqual(m.consumed, before.consumed);
+  assert.equal(h.stored().lastRecovery.authority, 'operator_confirmed_reload_current');
+  assert.equal(h.stored().lastRecovery.previous.override, 2);
+  assert.equal(h.stored().lastRecovery.previous.program.applied, 1.13);
+  assert.deepEqual(h.status().decisions[0].reason, 'recovered_manual');
+});
+
+test('Auto stays Automatic across a reload with zero commands and later recalls the accepted value', async () => {
+  const { h, filter, filterKey } = await reloadHold('auto');
+  await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' });
+  const restart = harness({ saved: h.stored() }); restart.current = 1; restart.workflow = h.workflow; await restart.start();
+  assert.equal(restart.status().held, null); assert.equal(restart.status().ready, true);
+  assert.equal(restart.status().profile.mode, 'auto'); assert.equal(restart.posts.length, 0);
+  await restart.select({ ...filter, title: 'Other profile' });
+  await restart.select(filter);
+  assert.deepEqual(restart.posts.map(p => p.flowMultiplier), [2, 1], 'the accepted value is recalled, never the old command');
+  assert.equal(restart.stored().machines['s:' + serial].programs[filterKey].applied, 1);
+});
+
+test('a Manual reload needs no command on restart and keeps other profile choices intact', async () => {
+  const { h, dflow } = await reloadHold('manual');
+  await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' });
+  const restart = harness({ saved: h.stored() }); restart.current = 1; restart.workflow = h.workflow; await restart.start();
+  assert.equal(restart.status().held, null); assert.equal(restart.status().profile.mode, 'manual');
+  assert.equal(restart.status().profile.manualValue, 1); assert.equal(restart.posts.length, 0);
+  assert.equal(restart.stored().machines['s:' + serial].overrides['t:' + dflow.title], 1);
+});
+
+test('after an Auto reload a delayed pre-recovery shot is ignored but a genuinely new shot still learns', async () => {
+  const { h, filter, filterKey } = await reloadHold('auto');
+  await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' });
+  // Controlled timestamps around the stored recovery cutoff, not the host clock.
+  const cutoff = h.stored().machines['s:' + serial].recoveryCutoff;
+  assert.equal(typeof cutoff, 'number'); assert.ok(isFinite(cutoff));
+  const delayed = shot('delayed', 1.6);
+  delayed.timestamp = new Date(cutoff - 1000).toISOString(); delayed.workflow.profile = structuredClone(filter);
+  h.shots.push(delayed);
+  await h.store('delayed');
+  assert.equal(h.posts.length, 0); assert.equal(h.current, 1);
+  assert.ok(h.status().decisions.some(d => d.reason === 'old_or_duplicate_shot'));
+  assert.deepEqual(h.stored().machines['s:' + serial].programs[filterKey], { target: 1, applied: 1 });
+  const fresh = shot('fresh', 1.6);
+  fresh.timestamp = new Date(cutoff + 60000).toISOString(); fresh.workflow.profile = structuredClone(filter);
+  h.shots.push(fresh); await h.store('fresh');
+  assert.deepEqual(h.posts.map(p => p.flowMultiplier), [1.6]);
+  assert.equal(h.status().profile.mode, 'auto');
+  const learned = h.stored().machines['s:' + serial].programs[filterKey];
+  assert.equal(learned.applied, 1.6); assert.ok(Math.abs(learned.target - 1.6) < 1e-9);
+});
+
+test('the reload authority is explicit: old matching-only requests, typed targets and stale reviews fail closed', async () => {
+  const { h } = await reloadHold('auto'), before = h.stored(), posted = h.posts.length;
+  const review = (await h.view()).recovery;
+  // A stale 2.0.1 page sends no action: matching-only Manual semantics, so the mismatch fails clearly.
+  assert.equal((await h.recover(recoveryBody(review))).status, 409);
+  for (const body of [
+    { ...recoveryBody(review), action: 'reload_current', confirmSettled: false },
+    { ...recoveryBody(review), action: 'reset_ledger' },
+    { ...recoveryBody(review), action: 'reload_current', value: 1.5 },
+    { ...recoveryBody(review), action: 'reload_current', value: 1.0001 },
+    { ...recoveryBody(review), action: 'reload_current', context: 'stale' },
+    { ...recoveryBody(review), action: 'reload_current', profileKey: 'p:other' },
+  ]) assert.ok((await h.recover(body)).status >= 400);
+  assert.deepEqual(h.stored(), before); assert.equal(h.posts.length, posted);
+  assert.ok(h.status().held); assert.ok(h.status().unresolvedIntent); assert.equal(h.status().profile.mode, 'auto');
+  h.machine.model = 'DE1Plus';
+  const wrong = await h.view();
+  assert.equal(wrong.recovery.available, false); assert.equal(wrong.recovery.reason, 'wrong_machine');
+  assert.deepEqual(h.stored(), before);
+});
+
+test('reload-current persistence failures and missing acknowledgements keep the hold and claim no success', async () => {
+  for (const offset of [1, 2]) {
+    const { h } = await reloadHold('auto'), body = { ...recoveryBody((await h.view()).recovery), action: 'reload_current' };
+    h.failStorageAt = h.storageAttempts + offset;
+    const response = await h.recover(body);
+    assert.ok(response.status >= 400); assert.notEqual(JSON.parse(response.body).saved, true);
+    assert.ok(h.status().held); assert.ok(h.stored().pending); assert.equal(h.posts.length, 0);
+    assert.equal(h.status().profile.mode, 'auto');
+    const events = h.storageAttempts;
+    await h.event('stateUpdate', {}); await h.event('workflowUpdated', h.workflow); await h.store();
+    assert.equal(h.storageAttempts, events); assert.equal(h.posts.length, 0, 'no automatic retry');
+    const restart = harness({ saved: h.stored() }); restart.current = 1; restart.workflow = h.workflow; await restart.start();
+    assert.ok(restart.status().held); assert.equal(restart.posts.length, 0);
+  }
+  const { h: noAck } = await reloadHold('auto', { ack: false }), review = (await noAck.view()).recovery;
+  assert.ok((await noAck.recover({ ...recoveryBody(review), action: 'reload_current' })).status >= 400);
+  assert.equal(noAck.status().held, 'storage_ack_timeout'); assert.equal(noAck.posts.length, 0);
+  const restart = harness({ saved: noAck.stored() }); restart.current = 1; restart.workflow = noAck.workflow; await restart.start();
+  assert.equal(restart.status().held, 'unresolved_write_intent'); assert.equal(restart.posts.length, 0);
+  // The durable result of the ambiguous write is either retained intent or a committed reload; both reload safely.
+  const retry = await restart.view();
+  assert.equal(retry.recovery.available, true); assert.equal(retry.recovery.mode, 'auto');
+  const again = await restart.recover({ ...recoveryBody(retry.recovery), action: 'reload_current' });
+  assert.equal(again.status, 200); assert.equal(restart.status().held, null);
+  assert.equal(restart.status().profile.mode, 'auto'); assert.equal(restart.posts.length, 0);
+});
+
+test('a second reload request cannot start while the first is still committing', async () => {
+  const { h } = await reloadHold('auto'), review = (await h.view()).recovery;
+  const body = { ...recoveryBody(review), action: 'reload_current' };
+  const first = h.plugin.__httpRequestHandler({ endpoint: 'recover', method: 'POST', body });
+  assert.equal((await h.recover(body)).status, 409);
+  assert.equal((await first).status, 200);
+  assert.equal(h.posts.length, 0); assert.equal(h.stored().machines['s:' + serial].expected, 1);
+});
+
+test('a legacy intent without a recorded model uses the same reload; a recorded model mismatch still blocks', async () => {
+  const seeded = await reloadHold('auto'), saved = seeded.h.stored(); delete saved.pending.model;
+  const h = harness({ saved }); h.current = 1; h.workflow = seeded.h.workflow; await h.start();
+  assert.ok(h.status().held);
+  const review = (await h.view()).recovery;
+  assert.equal(review.available, true); assert.equal(review.mode, 'auto'); assert.equal(review.command, 2); assert.equal(review.value, 1);
+  const response = await h.recover({ ...recoveryBody(review), action: 'reload_current' });
+  assert.equal(response.status, 200); assert.equal(h.status().profile.mode, 'auto'); assert.equal(h.posts.length, 0);
+  const bound = seeded.h.stored(); bound.pending.model = 'DE1Plus';
+  const wrong = harness({ saved: bound }); wrong.current = 1; wrong.workflow = seeded.h.workflow; await wrong.start();
+  const blocked = await wrong.view();
+  assert.equal(blocked.recovery.available, false); assert.equal(blocked.recovery.reason, 'wrong_machine');
+  assert.equal(wrong.posts.length, 0);
+});
+
+test('a value change or busy machine during reload preparation aborts without writing', async () => {
+  const { h } = await reloadHold('auto'), before = h.stored(), body = { ...recoveryBody((await h.view()).recovery), action: 'reload_current' };
+  h.hook = u => { if (u.pathname.endsWith('/shots')) h.current = 1.2; };
+  assert.equal((await h.recover(body)).status, 409);
+  assert.deepEqual(h.stored(), before); assert.equal(h.posts.length, 0);
+  assert.ok(h.status().held); assert.ok(h.status().unresolvedIntent);
+  const busy = await reloadHold('auto'), settled = busy.h.stored(), request = { ...recoveryBody((await busy.h.view()).recovery), action: 'reload_current' };
+  busy.h.hook = u => { if (u.pathname.endsWith('/shots')) busy.h.state = 'espresso'; };
+  assert.equal((await busy.h.recover(request)).status, 409);
+  assert.deepEqual(busy.h.stored(), settled); assert.equal(busy.h.posts.length, 0);
+  assert.ok(busy.h.status().held); assert.ok(busy.h.status().unresolvedIntent);
+});
+
+test('a lost completion acknowledgement may still have persisted a finished reload', async () => {
+  const seeded = await reloadHold('auto'), saved = seeded.h.stored();
+  const h = harness({ saved, ackAt: 2 }); h.current = 1; h.workflow = seeded.h.workflow; await h.start();
+  const response = await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' });
+  assert.ok(response.status >= 400); assert.equal(h.status().held, 'storage_ack_timeout'); assert.equal(h.posts.length, 0);
+  const persisted = h.stored();
+  assert.equal(persisted.pending, null, 'the completion write landed even though its acknowledgement was lost');
+  assert.equal(persisted.lastRecovery.mode, 'auto'); assert.equal(persisted.lastRecovery.value, 1);
+  const restart = harness({ saved: persisted }); restart.current = 1; restart.workflow = h.workflow; await restart.start();
+  assert.equal(restart.status().held, null); assert.equal(restart.status().unresolvedIntent, null);
+  assert.equal(restart.status().profile.mode, 'auto'); assert.equal(restart.posts.length, 0);
+});
+
+for (const mode of ['auto', 'manual']) {
+  test(`a ${mode} reload retried after a failed completion keeps the state it replaced in the audit`, async () => {
+    const { h, filterKey } = await reloadHold(mode), record = h.stored().machines['s:' + serial];
+    const replaced = { expected: record.expected, baseline: record.baseline, program: record.programs[filterKey],
+      override: record.overrides['t:Filter3'] === undefined ? null : record.overrides['t:Filter3'] };
+    h.failStorageAt = h.storageAttempts + 2; // the preparation lands, the completion write fails
+    const first = await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' });
+    assert.ok(first.status >= 400); assert.notEqual(JSON.parse(first.body).saved, true);
+    assert.ok(h.status().held); assert.equal(h.posts.length, 0);
+    const prepared = h.stored();
+    assert.ok(prepared.pending, 'the old intent stays durable until completion');
+    assert.deepEqual(prepared.lastRecovery.previous, replaced);
+    const restart = harness({ saved: prepared }); restart.current = 1; restart.workflow = h.workflow; await restart.start();
+    assert.equal(restart.status().held, 'unresolved_write_intent'); assert.equal(restart.posts.length, 0);
+    const review = (await restart.view()).recovery;
+    assert.equal(review.available, true); assert.equal(review.mode, mode);
+    const retry = await restart.recover({ ...recoveryBody(review), action: 'reload_current' });
+    assert.equal(retry.status, 200); assert.equal(JSON.parse(retry.body).saved, true); assert.equal(restart.posts.length, 0);
+    const audit = restart.stored().lastRecovery, m = restart.stored().machines['s:' + serial];
+    assert.deepEqual(audit.previous, replaced, 'the original replaced state survives the retry');
+    assert.deepEqual(audit.previousIntent, prepared.lastRecovery.previousIntent);
+    assert.equal(audit.previousIntent.command, 2); assert.equal(audit.previousIntent.key, filterKey);
+    assert.equal(audit.attempts, 2); assert.equal(audit.status, 'completed'); assert.equal(audit.mode, mode);
+    assert.ok(audit.cutoff >= prepared.lastRecovery.cutoff, 'the retry keeps a monotonic cutoff');
+    assert.equal(m.expected, 1); assert.ok(m.recoveryCutoff >= prepared.machines['s:' + serial].recoveryCutoff);
+    assert.equal(m.recoveryCutoff, audit.cutoff);
+    if (mode === 'auto') assert.deepEqual(m.programs[filterKey], { target: 1, applied: 1 });
+    else { assert.equal(m.overrides['t:Filter3'], 1); assert.deepEqual(m.programs[filterKey], { target: 1.35, applied: 1.13 }); }
+    const again = harness({ saved: restart.stored() }); again.current = 1; again.workflow = h.workflow; await again.start();
+    assert.equal(again.status().held, null); assert.equal(again.status().profile.mode, mode); assert.equal(again.posts.length, 0);
+  });
+
+  test(`a ${mode} reload with a missing preparation acknowledgement retries from the durable state and ignores the late acknowledgement`, async () => {
+    const { h, filterKey } = await reloadHold(mode, { ackAt: 1 }), record = h.stored().machines['s:' + serial];
+    const replaced = { expected: record.expected, baseline: record.baseline, program: record.programs[filterKey],
+      override: record.overrides['t:Filter3'] === undefined ? null : record.overrides['t:Filter3'] };
+    const first = await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' });
+    assert.ok(first.status >= 400); assert.notEqual(JSON.parse(first.body).saved, true);
+    assert.equal(h.status().held, 'storage_ack_timeout'); assert.equal(h.posts.length, 0);
+    const durable = h.stored();
+    assert.ok(durable.pending, 'the acknowledged-late preparation keeps the old intent');
+    assert.deepEqual(durable.lastRecovery.previous, replaced);
+    const writes = h.writes.length, attempts = h.storageAttempts;
+    await h.event('storageWrite', structuredClone(durable)); // the acknowledgement arrives after the timeout
+    assert.equal(h.writes.length, writes); assert.equal(h.storageAttempts, attempts);
+    assert.equal(h.status().held, 'storage_ack_timeout'); assert.equal(h.status().unresolvedIntent.command, 2);
+    assert.equal(h.posts.length, 0);
+    const retry = harness({ saved: durable }); retry.current = 1; retry.workflow = h.workflow; await retry.start();
+    assert.equal(retry.status().held, 'unresolved_write_intent'); assert.equal(retry.posts.length, 0);
+    const review = (await retry.view()).recovery;
+    assert.equal(review.available, true); assert.equal(review.mode, mode);
+    const response = await retry.recover({ ...recoveryBody(review), action: 'reload_current' });
+    assert.equal(response.status, 200); assert.equal(retry.posts.length, 0);
+    const audit = retry.stored().lastRecovery, m = retry.stored().machines['s:' + serial];
+    assert.deepEqual(audit.previous, replaced, 'the retry does not audit the already rebased values');
+    assert.equal(audit.previousIntent.command, 2); assert.equal(audit.previousIntent.key, filterKey);
+    assert.equal(audit.attempts, 2); assert.equal(audit.status, 'completed');
+    assert.equal(m.expected, 1); assert.ok(m.recoveryCutoff >= durable.machines['s:' + serial].recoveryCutoff);
+    assert.equal(m.recoveryCutoff, audit.cutoff);
+    if (mode === 'auto') assert.deepEqual(m.programs[filterKey], { target: 1, applied: 1 });
+    else { assert.equal(m.overrides['t:Filter3'], 1); assert.deepEqual(m.programs[filterKey], { target: 1.35, applied: 1.13 }); }
+  });
+}
+
+test('a finished reload audit is never lent to a later, byte-identical pause', async () => {
+  const { h, filter, filterKey } = await reloadHold('auto');
+  await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' });
+  const completed = h.stored();
+  assert.equal(completed.lastRecovery.status, 'completed');
+  assert.deepEqual(completed.lastRecovery.previous.program, { target: 2, applied: 2 });
+  // A new pause with the same fields must be audited from the current record, not from the finished reload.
+  const next = structuredClone(completed);
+  next.pending = { serial, model: 'DE1Pro', key: filterKey, shotId: null, expected: 2, command: 2, kind: 'learning' };
+  const h2 = harness({ saved: next }); h2.current = 2; h2.workflow = { profile: structuredClone(filter) }; await h2.start();
+  assert.equal(h2.status().held, 'unresolved_write_intent');
+  const review = (await h2.view()).recovery;
+  assert.equal(review.available, true); assert.equal(review.command, 2); assert.equal(review.value, 2);
+  assert.equal((await h2.recover({ ...recoveryBody(review), action: 'reload_current' })).status, 200);
+  const audit = h2.stored().lastRecovery;
+  assert.deepEqual(audit.previous.program, { target: 1, applied: 1 }, 'the current record is audited, not the earlier snapshot');
+  assert.equal(audit.previous.expected, 1); assert.equal(audit.attempts, 1);
+  assert.equal(h2.posts.length, 0);
+});
+
+test('returning to the reviewed value after another read does not resurrect an earlier recovery consent', async () => {
+  const { h } = await reloadHold('auto'), review = (await h.view()).recovery, before = h.stored();
+  assert.equal(review.value, 1);
+  h.current = 1.5; const away = (await h.view()).recovery;
+  assert.equal(away.value, 1.5); assert.notEqual(away.context, review.context);
+  h.current = 1; const back = (await h.view()).recovery;
+  assert.equal(back.value, 1); assert.equal(back.mode, 'auto'); assert.equal(back.available, true);
+  assert.notEqual(back.context, review.context, 'the old review cannot come back with the old value');
+  assert.notEqual(back.context, away.context);
+  const stale = await h.recover({ ...recoveryBody(review), action: 'reload_current' });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(h.stored(), before); assert.equal(h.posts.length, 0); assert.ok(h.status().held);
+  assert.equal((await h.recover({ ...recoveryBody(back), action: 'reload_current' })).status, 200);
+});
+
+test('a busy round-trip also ends the earlier recovery consent', async () => {
+  const { h } = await reloadHold('manual'), review = (await h.view()).recovery, before = h.stored();
+  assert.equal(review.mode, 'manual');
+  h.state = 'espresso'; const busy = (await h.view()).recovery;
+  assert.equal(busy.available, false); assert.equal(busy.reason, 'machine_busy');
+  h.state = 'idle'; const back = (await h.view()).recovery;
+  assert.equal(back.available, true); assert.equal(back.value, 1); assert.equal(back.mode, 'manual');
+  assert.notEqual(back.context, review.context);
+  assert.equal((await h.recover({ ...recoveryBody(review), action: 'reload_current' })).status, 409);
+  assert.deepEqual(h.stored(), before); assert.equal(h.posts.length, 0); assert.ok(h.status().unresolvedIntent);
+  assert.equal((await h.recover({ ...recoveryBody(back), action: 'reload_current' })).status, 200);
+});
+
+test('unchanged polls keep one review context so a normal confirmation still works', async () => {
+  const { h } = await reloadHold('auto');
+  const first = (await h.view()).recovery, second = (await h.view()).recovery, third = (await h.view()).recovery;
+  assert.equal(second.context, first.context); assert.equal(third.context, first.context);
+  assert.equal(third.value, first.value); assert.equal(third.command, first.command); assert.equal(third.mode, first.mode);
+  assert.equal((await h.recover({ ...recoveryBody(third), action: 'reload_current' })).status, 200);
+  assert.equal(h.posts.length, 0); assert.equal(h.status().profile.mode, 'auto');
+});
+
+test('an invalid saved recovery cutoff fails closed and a rewound clock cannot widen the exclusion', async () => {
+  const { h, filter } = await reloadHold('auto');
+  for (const bad of ['soon', null, NaN, Infinity, -Infinity, {}]) {
+    const corrupt = h.stored(); corrupt.machines['s:' + serial].recoveryCutoff = bad;
+    const rejected = harness({ saved: corrupt }); rejected.current = 1; rejected.workflow = h.workflow; await rejected.start();
+    assert.equal(rejected.status().held, 'invalid_saved_state'); assert.equal(rejected.posts.length, 0);
+  }
+  const future = Date.parse('2030-01-01T00:00:00Z'), saved = h.stored();
+  saved.machines['s:' + serial].recoveryCutoff = future;
+  const reopened = harness({ saved }); reopened.current = 1; reopened.workflow = h.workflow; await reopened.start();
+  const review = (await reopened.view()).recovery;
+  assert.equal(review.available, true);
+  assert.equal((await reopened.recover({ ...recoveryBody(review), action: 'reload_current' })).status, 200);
+  const m = reopened.stored().machines['s:' + serial];
+  assert.equal(m.recoveryCutoff, future, 'the earlier cutoff is not lowered when the clock is behind it');
+  assert.equal(reopened.stored().lastRecovery.cutoff, future);
+  const late = shot('late', 1.6); late.workflow.profile = structuredClone(filter);
+  late.timestamp = new Date(future - 60000).toISOString(); reopened.shots.push(late);
+  await reopened.store('late');
+  assert.equal(reopened.posts.length, 0);
+  assert.ok(reopened.status().decisions.some(d => d.reason === 'old_or_duplicate_shot'));
 });
 
 test('recovery never accepts an unreviewed request or a read-only request as confirmation', async () => {

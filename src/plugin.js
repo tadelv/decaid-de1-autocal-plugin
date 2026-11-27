@@ -7,12 +7,25 @@ function createPlugin(host) {
   var generation = 0, activeKey = null, activeTitle = null, pending = null, waiting = null, retryQueued = false, lastRetry = 0, controlBusy = false;
   var chain = Promise.resolve(), decisions = [], db = empty();
   var workflowCheck = null, workflowRevision = 0, recovering = false, recovery = null;
+  var consentEpoch = 0, observed = null;
   var session = Date.now().toString(36) + '-' + Math.random().toString(36), revision = 0;
   var ui = createFlowCalibrationUI(host, get, status, function () { return expectedSerial; }, models);
 
   // Fresh versioned storage leaves the legacy 1.x state untouched; no migration is attempted.
   function empty() { return { version: 2, machines: {}, pending: null }; }
   function context() { return session + ':' + generation + ':' + revision; }
+  function intentId(p) {
+    return !p ? 'none' : [p.serial, p.model === undefined ? '' : p.model, p.key,
+      p.shotId === null || p.shotId === undefined ? '' : String(p.shotId), p.expected, p.command, p.kind].join('|');
+  }
+  // A reviewed value may only be confirmed while nothing meaningful changed, even if a value comes back later.
+  // Storage revisions are excluded so the plugin's own staged write cannot invalidate its pending confirmation.
+  function reviewContext() { return session + ':' + generation + '#' + consentEpoch; }
+  function observeReview(s) {
+    var next = [s.serial, s.model, s.value, s.state, s.key, held === null ? '' : held, intentId(db.pending)].join('|');
+    if (next === observed) return;
+    observed = next; consentEpoch++;
+  }
   function canSetMode() { return alive(generation) && !!activeTitle && !!activeTitle.trim() && !waiting && !db.pending && !controlBusy && !workflowCheck; }
   // Manual is a choice for the named profile; editing its recipe must not silently turn Auto back on.
   function manualKey(title) { return 't:' + title; }
@@ -79,6 +92,7 @@ function createPlugin(host) {
         var r = m.programs[p];
         if (!r || !range(r.target) || (r.applied !== null && !grid(r.applied))) throw new Error('invalid_saved_state');
       });
+      if (m.recoveryCutoff !== undefined && (typeof m.recoveryCutoff !== 'number' || !isFinite(m.recoveryCutoff))) throw new Error('invalid_saved_state');
       if (value.version === 1 && m.overrides === undefined) m.overrides = {};
       if (!m.overrides || typeof m.overrides !== 'object' || Array.isArray(m.overrides) ||
           Object.keys(m.overrides).some(function (p) { return p.indexOf('t:') !== 0 || !p.slice(2).trim() || !grid(m.overrides[p]); })) throw new Error('invalid_saved_state');
@@ -96,10 +110,12 @@ function createPlugin(host) {
     var machineState = await get('/machine/state');
     var calibration = await get('/machine/calibration');
     if (!grid(calibration.flowMultiplier)) throw new Error('unsupported_live_multiplier');
-    ui.observe(info, calibration.flowMultiplier);
-    return { serial: String(info.serialNumber), model: info.model, key: key(workflow.profile), title: workflow.profile.title,
+    var seen = { serial: String(info.serialNumber), model: info.model, key: key(workflow.profile), title: workflow.profile.title,
       state: machineState.state && machineState.state.state,
       safe: safe(machineState.state), value: Math.round(calibration.flowMultiplier * 1000) / 1000 };
+    ui.observe(info, calibration.flowMultiplier);
+    observeReview(seen);
+    return seen;
   }
   function record(s) { return db.machines['s:' + s.serial]; }
   function syncProfile(s) {
@@ -228,7 +244,9 @@ function createPlugin(host) {
     if (!grid(machine.flowCalibration)) { note('unsupported_historical_multiplier', { shotId: id }); return; }
     var programKey = key(shot.workflow.profile), stamp = order(shot.timestamp);
     var m = db.machines['s:' + expectedSerial];
-    if (m.consumed.indexOf(id) >= 0 || stamp <= m.highWater) { note('old_or_duplicate_shot', { shotId: id }); return; }
+    if (m.consumed.indexOf(id) >= 0 || stamp <= m.highWater || (typeof m.recoveryCutoff === 'number' && stamp <= m.recoveryCutoff)) {
+      note('old_or_duplicate_shot', { shotId: id }); return;
+    }
     // shortcut: trial IDs grow monotonically; retain replay protection when compacting for long-term use.
     m.highWater = stamp; m.consumed.push(id);
     if (m.overrides[manualKey(shot.workflow.profile.title)] !== undefined) {
@@ -300,16 +318,19 @@ function createPlugin(host) {
       try {
         await settleWorkflow();
         var s = await snapshot(); syncProfile(s);
-        var intent = db.pending, reason = !validIntent(intent) ? 'invalid_saved_state'
+        var intent = db.pending, m = record(s), manual = m && m.overrides ? m.overrides[manualKey(s.title)] : undefined;
+        // A differing read-back is no longer a blocking reason: the explicit reload request accepts it.
+        var reason = !validIntent(intent) ? 'invalid_saved_state'
           : recovering || controlBusy || waiting ? 'recovery_busy'
           : intent.serial !== s.serial || (intent.model && intent.model !== s.model) ? 'wrong_machine'
           : !s.safe ? 'machine_busy'
-          : intent.key !== s.key ? 'recovery_profile_mismatch'
-          : intent.command !== s.value ? 'recovery_value_mismatch' : null;
-        recovery = { available: !reason, reason: reason, context: context(), profileKey: s.key, profileTitle: s.title,
-          serial: s.serial, model: s.model, value: s.value, command: intent.command, requiresSettledConfirmation: true };
+          : intent.key !== s.key ? 'recovery_profile_mismatch' : null;
+        recovery = { available: !reason, reason: reason, action: 'reload_current', context: reviewContext(), profileKey: s.key, profileTitle: s.title,
+          serial: s.serial, model: s.model, value: s.value, command: intent.command, intent: intentId(intent),
+          mode: manual === undefined ? 'auto' : 'manual',
+          requiresSettledConfirmation: true };
       } catch (error) {
-        var code = String(error.message || error); ui.changed(code);
+        var code = String(error.message || error); consentEpoch++; ui.changed(code);
         recovery = { available: false, reason: code };
       }
     }
@@ -320,34 +341,65 @@ function createPlugin(host) {
     var body;
     try { body = typeof request.body === 'string' ? JSON.parse(request.body) : request.body; } catch (error) { return json(request, 400, { error: 'invalid_request' }); }
     if (!body || body.confirmSettled !== true || !grid(body.value)) return json(request, 400, { error: 'explicit_recovery_confirmation_required' });
+    // Only an explicit discriminator may accept a read-back that differs from the paused command.
+    var reload = body.action === 'reload_current';
+    if (body.action !== undefined && !reload) return json(request, 400, { error: 'unsupported_recovery_action' });
     if (!enabled || stopped || !hydrated || !held || !validIntent(db.pending) || !recovery || !recovery.available ||
         controlBusy || recovering || waiting || workflowCheck) return json(request, 409, { error: 'recovery_unavailable' });
-    if (body.context !== context() || body.context !== recovery.context || body.profileKey !== recovery.profileKey || body.value !== recovery.value) return json(request, 409, { error: 'stale_context' });
+    if (body.context !== reviewContext() || body.context !== recovery.context || body.profileKey !== recovery.profileKey || body.value !== recovery.value) return json(request, 409, { error: 'stale_context' });
+    var reviewed = recovery;
     controlBusy = true; recovering = true;
     var code = 200, result = { saved: false };
     return serialized(async function () {
-      var originalIntent = db.pending, token = generation;
+      var originalIntent = db.pending, token = generation, intent = intentId(originalIntent);
       function matches(s) {
-        return !stopped && enabled && generation === token && s.safe && s.serial === originalIntent.serial &&
+        // The old matching-only authority still requires the read-back to equal the paused command.
+        return !stopped && enabled && generation === token && body.context === reviewContext() && s.safe && s.serial === originalIntent.serial &&
           (!originalIntent.model || s.model === originalIntent.model) && s.key === body.profileKey && s.key === originalIntent.key &&
-          s.value === body.value && s.value === originalIntent.command;
+          s.value === body.value && (reload || s.value === originalIntent.command);
       }
       await settleWorkflow();
       var s = await snapshot();
-      if (body.context !== context() || !matches(s)) { code = 409; result = { error: 'recovery_context_changed' }; return; }
+      if (!matches(s)) { code = 409; result = { error: 'recovery_context_changed' }; return; }
+      var current = record(s), manualNow = current && current.overrides ? current.overrides[manualKey(s.title)] : undefined;
+      var mode = manualNow === undefined ? 'auto' : 'manual';
+      if (reload && mode !== reviewed.mode) { code = 409; result = { error: 'recovery_context_changed' }; return; }
+      if (!reload) mode = 'manual';
       var prepared = JSON.parse(JSON.stringify(db)), m = prepared.machines['s:' + s.serial];
+      // An explicit retry of the same retained intent must not overwrite what the first attempt replaced.
+      var prior = reload && db.lastRecovery && db.lastRecovery.authority === 'operator_confirmed_reload_current' &&
+        db.lastRecovery.status === 'prepared' && db.lastRecovery.intent === intent ? db.lastRecovery : null;
+      // Audit the selected profile state this reload replaces, not only the old intent.
+      var previous = !reload ? null : prior && prior.previous ? prior.previous : { expected: m.expected, baseline: m.baseline,
+        program: m.programs[s.key] === undefined ? null : JSON.parse(JSON.stringify(m.programs[s.key])),
+        override: m.overrides[manualKey(s.title)] === undefined ? null : m.overrides[manualKey(s.title)] };
       await fenceHistory(m);
+      // Keep an earlier cutoff: a rewound host clock must not widen the pre-recovery shot exclusion.
+      var cutoff = Math.max(typeof m.recoveryCutoff === 'number' ? m.recoveryCutoff : -Infinity, Date.now()), at = new Date().toISOString();
       var final = await snapshot();
       if (!matches(final)) { code = 409; result = { error: 'recovery_context_changed' }; return; }
-      // The operator creates NEW manual authority; do not claim the ambiguous old write verified.
-      m.expected = s.value; m.overrides[manualKey(s.title)] = s.value;
-      prepared.lastRecovery = { previousIntent: JSON.parse(JSON.stringify(originalIntent)), authority: 'operator_confirmed_manual',
-        serial: s.serial, profileKey: s.key, value: s.value, confirmedSettled: true, at: new Date().toISOString() };
+      // The operator accepts ONLY the freshly read value; the old command is never treated as verified.
+      m.expected = s.value;
+      if (reload) {
+        // Delayed pre-recovery shots must not teach Auto, even when history is otherwise empty.
+        m.recoveryCutoff = cutoff;
+        if (mode === 'manual') m.overrides[manualKey(s.title)] = s.value;
+        else m.programs[s.key] = { target: s.value, applied: s.value };
+      } else m.overrides[manualKey(s.title)] = s.value;
+      prepared.lastRecovery = reload ? { previousIntent: prior && prior.previousIntent ? prior.previousIntent : JSON.parse(JSON.stringify(originalIntent)),
+        authority: 'operator_confirmed_reload_current', status: 'prepared', intent: intent, attempts: (prior ? prior.attempts || 0 : 0) + 1,
+        firstAt: prior && prior.firstAt ? prior.firstAt : at,
+        mode: mode, serial: s.serial, profileKey: s.key, profileTitle: s.title, value: s.value, command: originalIntent.command,
+        previous: previous, cutoff: cutoff, confirmedSettled: true, calibrationCommandSent: false, at: at }
+        : { previousIntent: JSON.parse(JSON.stringify(originalIntent)), authority: 'operator_confirmed_manual',
+          serial: s.serial, profileKey: s.key, value: s.value, confirmedSettled: true, at: at };
       // Keep the old intent durable until preparation and another context check acknowledge safely.
       await save(prepared); db = prepared;
       final = await snapshot();
       if (!matches(final)) { code = 409; result = { error: 'recovery_context_changed' }; return; }
       var completed = JSON.parse(JSON.stringify(prepared)); completed.pending = null;
+      // A finished reload is not a pending attempt: a later pause can never inherit its snapshot.
+      if (completed.lastRecovery) completed.lastRecovery.status = 'completed';
       await save(completed);
       if (!matches(await snapshot())) {
         await save(prepared); db = prepared;
@@ -355,8 +407,9 @@ function createPlugin(host) {
       }
       db = completed; pending = null; recovery = null; activeKey = s.key; activeTitle = s.title;
       ready = true; held = null; generation++;
-      note('recovered_manual', { profile: s.title, value: s.value, calibrationCommandSent: false });
-      result = { saved: true, profile: s.title, mode: 'manual', value: s.value, calibrationCommandSent: false };
+      note(reload ? 'recovered_' + mode : 'recovered_manual', { profile: s.title, value: s.value, mode: mode,
+        command: originalIntent.command, calibrationCommandSent: false });
+      result = { saved: true, profile: s.title, mode: mode, value: s.value, command: originalIntent.command, calibrationCommandSent: false };
     }).then(function () { return json(request, code === 200 && held ? 503 : code, code === 200 && held ? { error: held, uncertain: true } : result); })
       .finally(function () { controlBusy = false; recovering = false; ui.changed(); });
   }

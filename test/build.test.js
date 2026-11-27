@@ -10,7 +10,7 @@ test('the shipped original-ID package is the current build and matches its manif
   const payload = buildPlugin(), directory = path.join(__dirname, '../auto-flow-cal.reaplugin');
   assert.equal(payload.manifest.id, 'auto-flow-cal.reaplugin');
   assert.equal(payload.manifest.name, 'Auto Flow Calibration');
-  assert.equal(payload.manifest.version, '2.0.1');
+  assert.equal(payload.manifest.version, '2.0.2');
   const source = fs.readFileSync(path.join(directory, 'plugin.js'), 'utf8');
   assert.equal(source, payload.plugin);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'))), payload.manifest);
