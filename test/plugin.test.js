@@ -1396,6 +1396,76 @@ test('2.0.2 saved state gains the remembered Manual additively, while malformed 
   }
 });
 
+// A 2.0.3 start writes the optional memory map; a 2.0.2 round trip preserves that unknown map untouched and records
+// the later Manual choice only as an active override, so the map can be present yet empty or stale.
+test('an active Manual override beside a preserved memory map is still the remembered choice', async () => {
+  const seed = harness(); await seed.start(); await seed.mode('manual', 2);
+  const saved = seed.stored();
+  saved.machines['s:' + serial].manual = {}; // the map an earlier 2.0.3 start created, preserved without the entry
+  assert.deepEqual(saved.machines['s:' + serial].overrides, { 't:Trial': 2 });
+
+  const h = harness({ saved }); h.current = 2; await h.start();
+  assert.equal(h.status().held, null);
+  assert.equal(h.status().profile.mode, 'manual'); assert.equal(h.status().profile.manualValue, 2);
+  assert.equal(h.status().profile.rememberedManual, 2);
+  assert.deepEqual(h.stored().machines['s:' + serial].manual, { 't:Trial': 2 });
+
+  // The explicit Auto start drops only the active override: the saved choice stays remembered, with no command.
+  h.current = 1;
+  assert.equal((await h.mode('auto')).status, 200); assert.equal(h.posts.length, 0);
+  const record = h.stored().machines['s:' + serial];
+  assert.equal(record.overrides['t:Trial'], undefined); assert.deepEqual(record.manual, { 't:Trial': 2 });
+  assert.equal(h.status().profile.mode, 'auto'); assert.equal(h.status().profile.manualValue, null);
+  assert.equal(h.status().profile.rememberedManual, 2);
+
+  // A restart still offers it, and the same Manual choice again is a no-op that keeps it.
+  const restart = harness({ saved: h.stored() }); restart.current = 1; await restart.start();
+  assert.equal(restart.status().profile.rememberedManual, 2);
+  assert.equal((await restart.mode('manual', 2)).status, 200); assert.equal(restart.current, 2);
+  const posts = restart.posts.length;
+  assert.equal((await restart.mode('manual', 2)).status, 200); assert.equal(restart.posts.length, posts);
+  assert.equal(restart.status().profile.manualValue, 2);
+  assert.deepEqual(restart.stored().machines['s:' + serial].manual, { 't:Trial': 2 });
+});
+
+test('a stale remembered value beside an active Manual override defers to that saved choice', async () => {
+  const seed = harness(); await seed.start(); await seed.mode('manual', 2);
+  const saved = seed.stored();
+  // Memory 1.000 with active override 2.000: the override is the latest saved choice, and an inactive-only entry has none.
+  saved.machines['s:' + serial].manual = { 't:Trial': 1, 't:Other program': 1.5 };
+  const h = harness({ saved }); h.current = 2; await h.start();
+  assert.equal(h.status().profile.rememberedManual, 2);
+  assert.deepEqual(h.stored().machines['s:' + serial].manual, { 't:Trial': 2, 't:Other program': 1.5 });
+  h.current = 1;
+  assert.equal((await h.mode('auto')).status, 200); assert.equal(h.posts.length, 0);
+  const record = h.stored().machines['s:' + serial];
+  assert.equal(record.overrides['t:Trial'], undefined);
+  assert.deepEqual(record.manual, { 't:Trial': 2, 't:Other program': 1.5 });
+  assert.equal(h.status().profile.rememberedManual, 2);
+});
+
+test('an inactive-only remembered value survives an Auto start untouched', async () => {
+  const seed = harness(); await seed.start(); await seed.mode('manual', 2);
+  const saved = seed.stored(), record = saved.machines['s:' + serial];
+  delete record.overrides['t:Trial']; record.manual = { 't:Other program': 1.5 };
+  const h = harness({ saved }); h.current = 1.13; await h.start();
+  assert.equal(h.status().profile.mode, 'auto'); assert.equal(h.status().profile.rememberedManual, null);
+  h.current = 1;
+  assert.equal((await h.mode('auto')).status, 200); assert.equal(h.posts.length, 0);
+  assert.deepEqual(h.stored().machines['s:' + serial].manual, { 't:Other program': 1.5 });
+});
+
+test('a malformed remembered map fails closed instead of being repaired by the active override', async () => {
+  const seed = harness(); await seed.start(); await seed.mode('manual', 2);
+  for (const manual of [{ 't:Trial': 3 }, { 't:Trial': 1.0001 }, { bad: 2 }]) {
+    const saved = seed.stored();
+    saved.machines['s:' + serial].manual = manual;
+    const h = harness({ saved }); h.current = 2; await h.start();
+    assert.equal(h.status().held, 'invalid_saved_state', JSON.stringify(manual));
+    assert.equal(h.status().profile, null); assert.equal(h.posts.length, 0);
+  }
+});
+
 test('profile switches recall the automatic value, never the inactive Manual memory', async () => {
   const h = harness(); await h.start(); await h.store();
   assert.equal((await h.mode('manual', 2)).status, 200);

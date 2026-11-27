@@ -702,10 +702,14 @@ function createPlugin(host) {
       if (value.version === 1 && m.overrides === undefined) m.overrides = {};
       if (!m.overrides || typeof m.overrides !== 'object' || Array.isArray(m.overrides) ||
           Object.keys(m.overrides).some(function (p) { return p.indexOf('t:') !== 0 || !p.slice(2).trim() || !grid(m.overrides[p]); })) throw new Error('invalid_saved_state');
-      // 2.0.2 kept a Manual choice only as an active override; that value is also what the profile remembers.
-      if (m.manual === undefined) m.manual = Object.assign({}, m.overrides);
+      if (m.manual === undefined) m.manual = {};
       if (!m.manual || typeof m.manual !== 'object' || Array.isArray(m.manual) ||
           Object.keys(m.manual).some(function (p) { return p.indexOf('t:') !== 0 || !p.slice(2).trim() || !grid(m.manual[p]); })) throw new Error('invalid_saved_state');
+      // 2.0.2 kept a Manual choice only as an active override and preserved this optional map untouched across such a
+      // round trip, so the map can be present without that entry, or with an older one. A valid active override is the
+      // latest saved choice, so it is what the profile remembers; the map is validated first, so malformed data still
+      // fails closed. Entries without an active override are inactive memories and are left exactly as they are.
+      Object.keys(m.overrides).forEach(function (p) { m.manual[p] = m.overrides[p]; });
     });
     if (value.pending !== null && (!validIntent(value.pending) || !value.machines['s:' + value.pending.serial])) throw new Error('invalid_saved_state');
     value.version = 2;

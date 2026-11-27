@@ -37,7 +37,7 @@ Other profiles, machine values and histories are preserved; the ledger is not re
 | Enable calibration changes | Off | Allow automatic and manual changes on the selected DE1 |
 | DE1 serial number | Empty | Exact machine pin; blank prevents changes |
 
-Only traditional DE1 models are supported, never Bengle. The host must acknowledge matching `storageWrite` events and provide `events.machine` / `stateUpdate`. Missing identity, storage acknowledgement, scale evidence or valid measurements fails closed. A 2.0.2 ledger loads unchanged: the remembered Manual value is derived from its active Manual choice and is stored additively, with no new key or required schema change.
+Only traditional DE1 models are supported, never Bengle. The host must acknowledge matching `storageWrite` events and provide `events.machine` / `stateUpdate`. Missing identity, storage acknowledgement, scale evidence or valid measurements fails closed. A 2.0.2 ledger loads unchanged: a valid active Manual choice is always what the remembered value reports — even when a memory map written by an earlier 2.0.3 start is preserved across a 2.0.2 round trip without that entry — and is stored additively, with no new key or required schema change.
 
 **No old-settings migration is provided, as requested by the sole operator.** The v2 ledger uses the new `calibration-v2` key in the original plugin namespace. The old 1.x `state` entry is left untouched; temporary `-updater` state is not imported. Configure the serial and enable explicitly. Existing old settings are not a substitute for the new serial pin. First arming adopts the current live multiplier and fences existing shot history without a calibration command.
 
