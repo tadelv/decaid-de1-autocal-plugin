@@ -112,7 +112,7 @@ function browser(h = harness()) {
     Object.defineProperty(elements[match[1]], 'innerHTML', { set() { throw new Error('Never inject remote HTML'); } });
   }
   const messages = [], events = {}, documentEvents = {}, timers = [];
-  const b = { reads: 0, offline: false, cleared: false, failCommand: false, commands: [],
+  const b = { reads: 0, offline: false, cleared: false, failCommand: false, commands: [], recoveries: [],
     model: { value: .75, mode: 'Auto', readAt: '2026-11-26T12:00:00Z',
       lastTarget: .76, lastApplied: .75, coverage: 4.5, shotId: '<img onerror=bad()>', warnings: ['timing_sensitive'],
       warningText: ['Flow timing may affect the estimate.'], resultText: 'The new value was checked on the machine.', supportCode: 'applied_verified',
@@ -127,6 +127,13 @@ function browser(h = harness()) {
     fetch: async (url, init) => {
       b.reads++;
       const route = new URL(url).pathname;
+      if (route.endsWith('/recover')) {
+        const command = JSON.parse(init.body); assert.equal(init.method, 'POST'); b.recoveries.push(command);
+        if (b.failRecovery) throw new Error('lost recovery response');
+        b.model.profile.mode = 'manual'; b.model.profile.manualValue = command.value;
+        b.model.canSetMode = true; b.model.recovery = null; b.model.context = 'recovered';
+        return { ok: true, json: async () => ({ saved: true, profile: b.model.profile.title, mode: 'manual', value: command.value, calibrationCommandSent: false }) };
+      }
       if (route.endsWith('/mode')) {
         assert.equal(init.method, 'POST'); assert.equal(init.headers['Content-Type'], 'application/json');
         const command = JSON.parse(init.body); b.commands.push(command);
@@ -256,6 +263,31 @@ test('browser command failures tell the user what to do without exposing backend
     assert.ok(!e['action-message'].textContent.includes('raw_backend_error_identifier'));
     assert.equal(e['set-manual'].disabled, true); assert.equal(b.commands.length, 1);
   }
+});
+
+test('recovery requires explicit settled-change confirmation and sends only the reviewed Manual adoption', async () => {
+  const b = browser(), e = b.elements;
+  b.model.canSetMode = false; b.model.mode = 'Calibration paused'; b.model.value = 2;
+  b.model.recovery = { available: true, context: 'epoch-1', profileKey: 'filter3', profileTitle: 'Filter 3', value: 2, serial: 'target', model: 'DE1Pro' };
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(e['recovery-panel'].hidden, false); assert.equal(e.recover.disabled, true);
+  await e.recover.listeners.click(); assert.equal(b.recoveries.length, 0);
+  e['recovery-confirm'].checked = true; e['recovery-confirm'].listeners.change();
+  assert.equal(e.recover.disabled, false); await e.recover.listeners.click();
+  assert.deepEqual(b.recoveries, [{ context: 'epoch-1', profileKey: 'filter3', value: 2, confirmSettled: true }]);
+  assert.equal(b.commands.length, 0); assert.equal(e['recovery-panel'].hidden, true);
+  assert.match(e['action-message'].textContent, /No new calibration change/);
+});
+
+test('changed recovery context clears consent; failed recovery is never retried by polling', async () => {
+  const b = browser(), e = b.elements;
+  b.model.canSetMode = false; b.model.recovery = { available: true, context: 'epoch-1', profileKey: 'filter3', profileTitle: 'Filter 3', value: 2 };
+  await new Promise(resolve => setImmediate(resolve));e['recovery-confirm'].checked = true;e['recovery-confirm'].listeners.change();
+  b.model.recovery = { ...b.model.recovery, context: 'changed', value: 1.9 };await b.timers[0]();
+  assert.equal(e['recovery-confirm'].checked, false);assert.equal(e.recover.disabled, true);
+  e['recovery-confirm'].checked = true;e['recovery-confirm'].listeners.change();b.failRecovery = true;
+  await e.recover.listeners.click();assert.equal(b.recoveries.length, 1);assert.equal(e.recover.disabled, true);
+  await b.timers[0]();assert.equal(b.recoveries.length, 1);assert.match(e['action-message'].textContent, /Check again/);
 });
 
 test('surface survives the real Streamline parser', { skip: !process.env.STREAMLINE_SOURCE }, async () => {

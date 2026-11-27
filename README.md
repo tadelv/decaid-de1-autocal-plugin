@@ -1,6 +1,6 @@
 # Auto Flow Calibration — Decaid plugin
 
-**2.0.0 is an upgrade of the existing plugin, not a new plugin.** Its ID remains **`auto-flow-cal.reaplugin`**, so Decaid can update the original installation. The operator approved release after checking the UI and a normal shot on p85pro; calibration still requires supervised use. The operator-approved p85pro replacement is verified: **2.0.0 loaded and ready, temporary updater removed, multiplier unchanged at 0.835**.
+**2.0.1 upgrades the existing plugin, not a new plugin.** Its ID remains **`auto-flow-cal.reaplugin`**, so Decaid can update the original installation. This [hotfix](docs/RELEASE-2.0.1.md) corrects delayed profile-event handling and adds explicit recovery for matching paused changes. Calibration still requires supervised use.
 
 It brings the displayed scale weight-flow and machine water-flow lines closer by adjusting the machine's estimation multiplier between shots. Calibration can affect flow-controlled extraction, not only the chart. Keep testing supervised.
 
@@ -19,7 +19,7 @@ Manual choices currently use the exact profile title per DE1. Same-named profile
 
 ## Installation and settings
 
-[Decaid installation instructions](https://decentespresso.com/docs/how_to_install_skins_or_plugins_on_decaid). Use the release's **`auto-flow-cal-v2.0.0.zip`**, or the checked-in `auto-flow-cal.reaplugin/` directory. It contains the complete built plugin; copying `src/plugin.js` alone does not work. The normal public GitHub installation route uses the latest published release.
+[Decaid installation instructions](https://decentespresso.com/docs/how_to_install_skins_or_plugins_on_decaid). Use the release's **`auto-flow-cal-v2.0.1.zip`**, or the checked-in `auto-flow-cal.reaplugin/` directory. It contains the complete built plugin; copying `src/plugin.js` alone does not work. The normal public GitHub installation route uses the latest published release.
 
 | Setting | Fresh default | Meaning |
 |---|---|---|
@@ -49,7 +49,7 @@ GET /api/v1/plugins/auto-flow-cal.reaplugin/ui
 GET /api/v1/plugins/auto-flow-cal.reaplugin/view
 ```
 
-`status` reads memory only. `view` independently reads the selected machine; `skin` and `ui` render cached data and declarations. None applies/reset/enables calibration. Only explicit POST `mode` selects Manual/Auto, with master-enable, serial, context, idle and persistence checks.
+`status` reads memory only. `view` independently reads the selected machine; while an intent is held, it also reviews current workflow/state for recovery. `skin` and `ui` render cached data and declarations. These GETs never clear an intent or send calibration commands. Explicit POST `mode` selects Manual/Auto; POST `recover` requires an operator-confirmed review and keeps a matching checked value in Manual without resending it. Both preserve target, context, idle and persistence guards.
 
 ## Development
 
@@ -65,6 +65,6 @@ npm run fit:offline -- --v2          # current zero-lag fitter, offline sanitize
 
 Current controller and UI tests run against the real compiled bundle. Frozen 1.4 code lives under `test/legacy/` only, with explicitly named legacy tests and `tools/legacy-why-skip.js` for historical diagnostics; it is not bundled. Sanitized real-shot fixtures contain no machine identity or personal shot metadata. The separate historical [observer](observer/README.md) remains research tooling, not a second calibration writer.
 
-Release tags must match the manifest (`v2.0.0`). The workflow prepares **drafts only**; publication requires operator approval. [Release notes and remaining test gate](docs/RELEASE-2.0.0.md). [Recorded supervised-trial evidence](docs/trial-results.md).
+Release tags must match the manifest (`v2.0.1`). The workflow prepares **drafts only**; publication requires operator approval. [Hotfix notes, recovery steps and validation limits](docs/RELEASE-2.0.1.md). [Recorded supervised-trial evidence](docs/trial-results.md).
 
 The earlier Design and Implementation Plan describe 1.x and remain historical references. The current behavior and limitations are documented here, in the UI notes and regression tests.
