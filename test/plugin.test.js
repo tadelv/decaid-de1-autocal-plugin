@@ -111,6 +111,42 @@ async function reloadHold(mode = 'auto', options = {}) {
   return { h, filter, dflow, filterKey };
 }
 
+// A retry reuses what the failed preparation recorded, so these cases all start from a real prepared reload.
+async function preparedReload(mode = 'auto') {
+  const { h, filter, filterKey } = await reloadHold(mode);
+  h.failStorageAt = h.storageAttempts + 2; // the preparation lands, the completion write fails
+  assert.ok((await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' })).status >= 400);
+  const saved = h.stored();
+  assert.ok(saved.pending); assert.equal(saved.lastRecovery.status, 'prepared');
+  return { saved, filter, filterKey };
+}
+
+const omittedShotId = Symbol('omitted shot id');
+
+// The same reported pause, carrying the shot provenance that the persisted intent records.
+async function reloadHoldShot(shotId) {
+  const filter = { title: 'Filter3', version: '1', steps: [{ name: 'pour', flow: 2 }] };
+  const dflow = { title: 'D-Flow / Step-down', version: '1', steps: [{ name: 'pour', pressure: 6 }] };
+  const seed = harness(); seed.current = 2; seed.workflow = { profile: structuredClone(filter) }; await seed.start();
+  const filterKey = seed.status().profile.key;
+  await seed.select(dflow); await seed.mode('manual', 1);
+  const saved = seed.stored(), record = saved.machines['s:' + serial];
+  record.programs[filterKey] = { target: 2, applied: 2 };
+  saved.pending = { serial, model: 'DE1Pro', key: filterKey, expected: 2, command: 2, kind: 'learning' };
+  if (shotId !== omittedShotId) saved.pending.shotId = shotId;
+  const h = harness({ saved }); h.current = 1; h.workflow = { profile: structuredClone(filter) }; await h.start();
+  return { h, filter, filterKey };
+}
+
+async function preparedShot(shotId) {
+  const { h, filter, filterKey } = await reloadHoldShot(shotId);
+  h.failStorageAt = h.storageAttempts + 2; // the preparation lands, the completion write fails
+  assert.ok((await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' })).status >= 400);
+  const saved = h.stored();
+  assert.ok(saved.pending); assert.equal(saved.lastRecovery.status, 'prepared');
+  return { saved, filter, filterKey };
+}
+
 test('late workflow events during a verified write cannot replace the authoritative active profile', async () => {
   const h = harness(), filter = { title: 'Filter3', version: '1', steps: [{ name: 'pour', flow: 2 }] };
   h.current = 2; h.workflow = { profile: structuredClone(filter) }; await h.start();
@@ -491,6 +527,382 @@ for (const mode of ['auto', 'manual']) {
   });
 }
 
+const unreadableAudit = [
+  ['previousIntent is not an intent', audit => { audit.previousIntent = 'corrupt'; }],
+  ['previousIntent is missing', audit => { delete audit.previousIntent; }],
+  ['previousIntent is an array', audit => { audit.previousIntent = []; }],
+  ['previousIntent names another profile', audit => { audit.previousIntent = { ...audit.previousIntent, key: 'p:other', command: 1.5 }; }],
+  ['previousIntent holds an unsupported command', audit => { audit.previousIntent = { ...audit.previousIntent, command: 9 }; }],
+  ['previousIntent lost the recorded model', audit => { delete audit.previousIntent.model; }],
+  ['previous is an array', audit => { audit.previous = []; }],
+  ['previous is missing', audit => { delete audit.previous; }],
+  ['previous is null', audit => { audit.previous = null; }],
+  ['previous expected is not a multiplier', audit => { audit.previous.expected = 'bad'; }],
+  ['previous baseline is out of bounds', audit => { audit.previous.baseline = 3; }],
+  ['previous program is an array', audit => { audit.previous.program = []; }],
+  ['previous program target is out of bounds', audit => { audit.previous.program = { target: 9, applied: 2 }; }],
+  ['previous program applied value is unreadable', audit => { audit.previous.program = { target: 2, applied: 'bad' }; }],
+  ['previous override is not a multiplier', audit => { audit.previous.override = 'bad'; }],
+  ['attempts is not a number', audit => { audit.attempts = 'bad'; }],
+  ['attempts is zero', audit => { audit.attempts = 0; }],
+  ['attempts is fractional', audit => { audit.attempts = 1.5; }],
+  ['attempts is missing', audit => { delete audit.attempts; }],
+  ['firstAt is not a timestamp', audit => { audit.firstAt = 'bad'; }],
+  ['firstAt is not a string', audit => { audit.firstAt = 42; }],
+];
+
+for (const [label, corrupt] of unreadableAudit) {
+  test(`a prepared reload with unreadable provenance (${label}) fails closed and keeps the retained intent`, async () => {
+    const { saved, filter } = await preparedReload('auto');
+    const record = saved.machines['s:' + serial];
+    corrupt(saved.lastRecovery);
+    const corruptRecord = structuredClone(saved);
+    const h = harness({ saved }); h.current = 1; h.workflow = { profile: structuredClone(filter) }; await h.start();
+    assert.deepEqual(h.stored(), corruptRecord, 'reloading an unreadable audit does not rewrite it');
+    const review = (await h.view()).recovery;
+    assert.equal(review.available, true); assert.equal(review.mode, 'auto');
+    const writes = h.writes.length;
+    const response = await h.recover({ ...recoveryBody(review), action: 'reload_current' }), body = JSON.parse(response.body);
+    assert.ok(response.status >= 400, 'an unreadable audit is never a successful recovery');
+    assert.notEqual(body.saved, true); assert.equal(body.error, 'invalid_recovery_audit');
+    const after = h.stored();
+    assert.equal(h.writes.length, writes, 'nothing is durably rewritten before the audit is proven readable');
+    assert.deepEqual(after, corruptRecord, 'the retained intent, ledger and audit stay exactly as they were');
+    assert.deepEqual(after.pending, saved.pending, 'no original intent audit is destroyed');
+    assert.deepEqual(after.machines['s:' + serial], record, 'the ledger is not rebased');
+    assert.equal(after.pending.command, 2); assert.equal(after.pending.key, review.profileKey);
+    assert.equal(h.posts.length, 0, 'recovery never sends a calibration command');
+    assert.equal(h.status().held, 'unresolved_write_intent'); assert.equal(h.status().unresolvedIntent.command, 2);
+    assert.equal(h.status().profile.mode, 'auto');
+  });
+}
+
+// Provenance is only readable while it is the SAME original intent: a grid-valid but different command,
+// expected value, kind or shot id would otherwise replace the original intent audit the retry carries forward.
+const driftedAudit = [
+  ['previousIntent holds another expected value', audit => { audit.previousIntent.expected = 1.5; }],
+  ['previousIntent holds another command', audit => { audit.previousIntent.command = 1.35; }],
+  ['previousIntent holds another kind', audit => { audit.previousIntent.kind = 'manual'; }],
+  ['previousIntent holds another shot id', audit => { audit.previousIntent.shotId = 'another-shot'; }],
+  ['previousIntent invents a shot id the retained intent never had', audit => { audit.previousIntent.shotId = 7; }],
+];
+
+for (const [label, corrupt] of driftedAudit) {
+  test(`a prepared reload whose audit keeps only the machine and profile (${label}) fails closed`, async () => {
+    const { saved, filter } = await preparedReload('auto');
+    const record = saved.machines['s:' + serial], pristine = structuredClone(saved.lastRecovery.previousIntent);
+    corrupt(saved.lastRecovery);
+    const corruptRecord = structuredClone(saved);
+    const h = harness({ saved }); h.current = 1; h.workflow = { profile: structuredClone(filter) }; await h.start();
+    const review = (await h.view()).recovery;
+    assert.equal(review.available, true); assert.equal(review.mode, 'auto');
+    const writes = h.writes.length;
+    const response = await h.recover({ ...recoveryBody(review), action: 'reload_current' }), body = JSON.parse(response.body);
+    assert.ok(response.status >= 400, 'a different original intent is never a successful recovery');
+    assert.notEqual(body.saved, true); assert.equal(body.error, 'invalid_recovery_audit');
+    assert.equal(body.field, 'previousIntent');
+    const after = h.stored();
+    assert.equal(h.writes.length, writes, 'nothing is durably rewritten before the audit is proven readable');
+    assert.deepEqual(after, corruptRecord, 'the retained intent, ledger and audit stay exactly as they were');
+    assert.deepEqual(after.pending, saved.pending, 'the original intent is never replaced by the drifted one');
+    assert.deepEqual(after.machines['s:' + serial], record, 'the ledger is not rebased');
+    assert.equal(h.posts.length, 0, 'recovery never sends a calibration command');
+    assert.equal(h.status().held, 'unresolved_write_intent'); assert.equal(h.status().profile.mode, 'auto');
+    assert.notDeepEqual(after.lastRecovery.previousIntent, pristine, 'the unreadable provenance is never rebuilt from the retained intent');
+  });
+}
+
+// The persisted marker joins its fields with '|', and a profile key or shot id may itself contain that separator.
+// A record that only reproduces the joined string is not this same attempt: the fields themselves decide, so a
+// shot id shifted into the key fails closed instead of consuming the retained intent.
+test('a prepared reload whose audit only reproduces the joined marker from shifted fields fails closed', async () => {
+  const { h, filter, filterKey } = await reloadHold('auto'), saved = h.stored();
+  saved.pending.shotId = 'left|right';
+  const first = harness({ saved }); first.current = 1; first.workflow = { profile: structuredClone(filter) }; await first.start();
+  first.failStorageAt = first.storageAttempts + 2;
+  assert.ok((await first.recover({ ...recoveryBody((await first.view()).recovery), action: 'reload_current' })).status >= 400);
+  const prepared = first.stored();
+  assert.ok(prepared.pending); assert.equal(prepared.lastRecovery.status, 'prepared');
+  assert.equal(prepared.lastRecovery.previousIntent.key, filterKey);
+  assert.equal(prepared.lastRecovery.previousIntent.shotId, 'left|right');
+  // Moving the separator moves the same characters into another field: the joined marker is unchanged.
+  prepared.lastRecovery.previousIntent.key = filterKey + '|left';
+  prepared.lastRecovery.previousIntent.shotId = 'right';
+  const marker = i => [i.serial, i.model, i.key, String(i.shotId), i.expected, i.command, i.kind].join('|');
+  assert.equal(marker(prepared.lastRecovery.previousIntent), prepared.lastRecovery.intent);
+  const corruptRecord = structuredClone(prepared);
+  const restart = harness({ saved: prepared }); restart.current = 1; restart.workflow = { profile: structuredClone(filter) }; await restart.start();
+  assert.equal(restart.status().held, 'unresolved_write_intent');
+  const review = (await restart.view()).recovery;
+  assert.equal(review.available, true); assert.equal(review.mode, 'auto'); assert.equal(review.command, 2);
+  const writes = restart.writes.length;
+  const response = await restart.recover({ ...recoveryBody(review), action: 'reload_current' }), body = JSON.parse(response.body);
+  assert.equal(response.status, 409, 'a marker collision is never a successful recovery');
+  assert.equal(body.error, 'invalid_recovery_audit'); assert.equal(body.field, 'previousIntent');
+  assert.notEqual(body.saved, true);
+  const after = restart.stored();
+  assert.equal(restart.writes.length, writes, 'nothing is durably rewritten before the audit is proven readable');
+  assert.deepEqual(after, corruptRecord, 'the retained intent, ledger and audit stay exactly as they were');
+  assert.deepEqual(after.pending, corruptRecord.pending, 'the retained intent is not consumed');
+  assert.deepEqual(after.lastRecovery, corruptRecord.lastRecovery, 'the shifted provenance is never carried forward');
+  assert.deepEqual(after.machines['s:' + serial], corruptRecord.machines['s:' + serial], 'the ledger is not rebased');
+  assert.equal(restart.posts.length, 0, 'recovery never sends a calibration command');
+  assert.equal(restart.status().profile.mode, 'auto'); assert.equal(restart.status().unresolvedIntent.command, 2);
+});
+
+// The separator is legal inside a profile key or shot id, so a pipe-containing intent is still one single
+// intent: it must retry exactly like any other one.
+test('a prepared reload whose original intent contains the marker separator still retries', async () => {
+  const piped = { title: 'Filter|3', version: '1', steps: [{ name: 'pour|two', flow: 2 }] };
+  const dflow = { title: 'D-Flow / Step-down', version: '1', steps: [{ name: 'pour', pressure: 6 }] };
+  const seed = harness(); seed.current = 2; seed.workflow = { profile: structuredClone(piped) }; await seed.start();
+  const pipedKey = seed.status().profile.key;
+  assert.ok(pipedKey.indexOf('|') > 0, 'the fixture key contains the marker separator');
+  await seed.select(dflow); await seed.mode('manual', 1);
+  const saved = seed.stored(), record = saved.machines['s:' + serial];
+  record.programs[pipedKey] = { target: 2, applied: 2 };
+  saved.pending = { serial, model: 'DE1Pro', key: pipedKey, shotId: 'left|right', expected: 2, command: 2, kind: 'learning' };
+  const h = harness({ saved }); h.current = 1; h.workflow = { profile: structuredClone(piped) }; await h.start();
+  h.failStorageAt = h.storageAttempts + 2; // the preparation lands, the completion write fails
+  assert.ok((await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' })).status >= 400);
+  const prepared = h.stored();
+  assert.ok(prepared.pending); assert.equal(prepared.lastRecovery.status, 'prepared');
+  assert.equal(prepared.lastRecovery.previousIntent.key, pipedKey);
+  assert.equal(prepared.lastRecovery.previousIntent.shotId, 'left|right');
+  const restart = harness({ saved: prepared }); restart.current = 1; restart.workflow = { profile: structuredClone(piped) }; await restart.start();
+  assert.equal(restart.status().held, 'unresolved_write_intent');
+  const retry = await restart.recover({ ...recoveryBody((await restart.view()).recovery), action: 'reload_current' });
+  assert.equal(retry.status, 200); assert.equal(JSON.parse(retry.body).saved, true);
+  const audit = restart.stored().lastRecovery, m = restart.stored().machines['s:' + serial];
+  assert.equal(audit.status, 'completed'); assert.equal(audit.attempts, 2); assert.equal(audit.mode, 'auto');
+  assert.deepEqual(audit.previousIntent, prepared.lastRecovery.previousIntent);
+  assert.equal(m.expected, 1); assert.deepEqual(m.programs[pipedKey], { target: 1, applied: 1 });
+  assert.equal(restart.stored().pending, null); assert.equal(restart.posts.length, 0);
+});
+
+// A prepared reload that survives only in part is still the same attempt: the retry must never discard it and
+// rebuild the replaced-profile audit out of the values the failed preparation already rebased.
+const partialAudit = [
+  ['status is missing', audit => { delete audit.status; }, 'status'],
+  ['status is unreadable', audit => { audit.status = 42; }, 'status'],
+  ['status is null', audit => { audit.status = null; }, 'status'],
+  ['status is an unknown value', audit => { audit.status = 'applied'; }, 'status'],
+  ['intent is missing', audit => { delete audit.intent; }, 'intent'],
+  ['intent is unreadable', audit => { audit.intent = 42; }, 'intent'],
+  ['intent is an array', audit => { audit.intent = []; }, 'intent'],
+  ['intent names another attempt', audit => { audit.intent = audit.intent.replace(/\|learning$/, '|recall'); }, 'intent'],
+];
+
+for (const [label, corrupt, field] of partialAudit) {
+  test(`a prepared reload whose audit keeps only part of the attempt (${label}) fails closed on that field`, async () => {
+    const { saved, filter } = await preparedReload('auto');
+    const record = saved.machines['s:' + serial], previous = structuredClone(saved.lastRecovery.previous);
+    corrupt(saved.lastRecovery);
+    const corruptRecord = structuredClone(saved);
+    const h = harness({ saved }); h.current = 1; h.workflow = { profile: structuredClone(filter) }; await h.start();
+    assert.deepEqual(h.stored(), corruptRecord, 'reloading a partially unreadable audit does not rewrite it');
+    const review = (await h.view()).recovery;
+    assert.equal(review.available, true); assert.equal(review.mode, 'auto');
+    assert.equal(review.command, 2); assert.equal(review.value, 1);
+    const writes = h.writes.length;
+    const response = await h.recover({ ...recoveryBody(review), action: 'reload_current' }), body = JSON.parse(response.body);
+    assert.equal(response.status, 409, 'the surviving part of the attempt is validated, not bypassed');
+    assert.equal(body.error, 'invalid_recovery_audit'); assert.equal(body.field, field); assert.equal(body.saved, undefined);
+    const after = h.stored();
+    assert.equal(h.writes.length, writes, 'nothing is durably rewritten before the audit is proven readable');
+    assert.deepEqual(after, corruptRecord, 'the retained intent, ledger and audit stay exactly as they were');
+    assert.deepEqual(after.pending, saved.pending, 'the retained intent is not consumed');
+    assert.deepEqual(after.machines['s:' + serial], record, 'the ledger is not rebased from the prepared values');
+    assert.deepEqual(after.lastRecovery.previous, previous, 'the replaced profile audit is not rebuilt from the rebased values');
+    assert.equal(h.posts.length, 0, 'recovery never sends a calibration command');
+    assert.equal(h.status().held, 'unresolved_write_intent'); assert.equal(h.status().unresolvedIntent.command, 2);
+    assert.equal(h.status().profile.mode, 'auto');
+  });
+}
+
+test('a prepared reload that lost both its status and its intent is still recognized by its original intent', async () => {
+  const { saved, filter } = await preparedReload('auto');
+  delete saved.lastRecovery.status; delete saved.lastRecovery.intent;
+  const corruptRecord = structuredClone(saved);
+  const h = harness({ saved }); h.current = 1; h.workflow = { profile: structuredClone(filter) }; await h.start();
+  const review = (await h.view()).recovery;
+  assert.equal(review.available, true); assert.equal(review.command, 2);
+  const writes = h.writes.length;
+  const response = await h.recover({ ...recoveryBody(review), action: 'reload_current' }), body = JSON.parse(response.body);
+  assert.equal(response.status, 409); assert.equal(body.error, 'invalid_recovery_audit'); assert.equal(body.field, 'status');
+  assert.equal(h.writes.length, writes); assert.deepEqual(h.stored(), corruptRecord);
+  assert.equal(h.posts.length, 0);
+});
+
+test('a prepared legacy reload keeps retrying while both the intent and its audit omit the model', async () => {
+  const seeded = await reloadHold('auto'), saved = seeded.h.stored();
+  delete saved.pending.model;
+  const h = harness({ saved }); h.current = 1; h.workflow = seeded.h.workflow; await h.start();
+  h.failStorageAt = h.storageAttempts + 2;
+  assert.ok((await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' })).status >= 400);
+  const prepared = h.stored();
+  assert.ok(prepared.pending); assert.equal(prepared.pending.model, undefined);
+  assert.equal(prepared.lastRecovery.previousIntent.model, undefined, 'a legacy intent is audited without a model');
+  const restart = harness({ saved: prepared }); restart.current = 1; restart.workflow = seeded.h.workflow; await restart.start();
+  assert.equal(restart.status().held, 'unresolved_write_intent');
+  const retry = await restart.recover({ ...recoveryBody((await restart.view()).recovery), action: 'reload_current' });
+  assert.equal(retry.status, 200); assert.equal(JSON.parse(retry.body).saved, true);
+  assert.equal(restart.posts.length, 0);
+  const audit = restart.stored().lastRecovery, m = restart.stored().machines['s:' + serial];
+  assert.equal(restart.stored().pending, null); assert.equal(audit.status, 'completed');
+  assert.equal(audit.previousIntent.command, 2); assert.equal(audit.previousIntent.model, undefined);
+  assert.equal(m.expected, 1); assert.equal(restart.status().profile.mode, 'auto');
+});
+
+test('a Manual prepared reload with unreadable provenance also fails closed and stays Manual', async () => {
+  const { saved, filter } = await preparedReload('manual');
+  saved.lastRecovery.previousIntent = 'corrupt'; saved.lastRecovery.previous = []; saved.lastRecovery.attempts = 'bad';
+  const corruptRecord = structuredClone(saved);
+  const h = harness({ saved }); h.current = 1; h.workflow = { profile: structuredClone(filter) }; await h.start();
+  const review = (await h.view()).recovery;
+  assert.equal(review.available, true); assert.equal(review.mode, 'manual');
+  const response = await h.recover({ ...recoveryBody(review), action: 'reload_current' }), body = JSON.parse(response.body);
+  assert.ok(response.status >= 400); assert.equal(body.error, 'invalid_recovery_audit'); assert.notEqual(body.saved, true);
+  assert.deepEqual(h.stored(), corruptRecord); assert.equal(h.posts.length, 0);
+  assert.equal(h.status().profile.mode, 'manual'); assert.equal(h.status().unresolvedIntent.command, 2);
+});
+
+// A paused intent records either a shot name or null for a change that had no shot. Those are the only shapes
+// the controller ever persists, so anything else is unreadable saved state: it must stop hydration instead of
+// being read back as a usable intent.
+const malformedShotIds = [['an array', []], ['an object', {}], ['a number', 7], ['a boolean', true]];
+
+for (const [label, shotId] of malformedShotIds) {
+  test(`a paused intent with a malformed shot id (${label}) is refused as invalid saved state`, async () => {
+    const { h: seed, filter } = await reloadHold('auto'), saved = seed.stored();
+    saved.pending.shotId = shotId;
+    const corruptRecord = structuredClone(saved);
+    const h = harness({ saved }); h.current = 1; h.workflow = { profile: structuredClone(filter) }; await h.start();
+    assert.equal(h.status().held, 'invalid_saved_state', 'unreadable saved state is refused, never hydrated');
+    assert.equal(h.status().ready, false); assert.equal(h.status().unresolvedIntent, null);
+    assert.equal(h.writes.length, 0, 'refused saved state is never rewritten');
+    assert.deepEqual(h.stored(), corruptRecord, 'the unreadable record is retained exactly as stored');
+    assert.equal((await h.view()).recovery, null, 'no review is offered for unreadable state');
+    const response = await h.recover({ context: 'stale', profileKey: 'p:stale', value: 1, confirmSettled: true, action: 'reload_current' });
+    assert.equal(response.status, 409); assert.equal(JSON.parse(response.body).error, 'recovery_unavailable');
+    assert.equal(h.writes.length, 0); assert.equal(h.posts.length, 0, 'recovery never sends a calibration command');
+    assert.deepEqual(h.stored(), corruptRecord, 'the unreadable record is still retained');
+  });
+}
+
+// Provenance is only readable while it is literally the same original intent. A shot id that merely coerces to
+// the same text (an array, an object, a number or a boolean), or an empty name standing in for "no shot at all",
+// is a different record: it fails closed instead of consuming the retained intent.
+// The persisted marker folds an absent shot id and an empty name alike, so every one of these records reproduces
+// the retained intent's marker exactly: only the fields themselves can refuse them.
+const intentMarker = i => [i.serial, i.model === undefined ? '' : i.model, i.key,
+  i.shotId === null || i.shotId === undefined ? '' : String(i.shotId), i.expected, i.command, i.kind].join('|');
+const shotIdShapes = [
+  ['an array where the intent has no shot', null, audit => { audit.previousIntent.shotId = []; }],
+  ['an array where the intent has an empty name', '', audit => { audit.previousIntent.shotId = []; }],
+  ['an array around the same name', 'left', audit => { audit.previousIntent.shotId = ['left']; }],
+  ['an object where the intent holds the object string', '[object Object]', audit => { audit.previousIntent.shotId = {}; }],
+  ['a number where the intent holds its string', '7', audit => { audit.previousIntent.shotId = 7; }],
+  ['a boolean where the intent holds its string', 'true', audit => { audit.previousIntent.shotId = true; }],
+  ['an empty name where the intent has no shot', omittedShotId, audit => { audit.previousIntent.shotId = ''; }],
+  ['no shot where the intent has an empty name', '', audit => { delete audit.previousIntent.shotId; }],
+];
+
+for (const [label, shotId, corrupt] of shotIdShapes) {
+  test(`a prepared reload whose audit holds a different shot id (${label}) fails closed`, async () => {
+    const { saved, filter } = await preparedShot(shotId);
+    const record = saved.machines['s:' + serial];
+    corrupt(saved.lastRecovery);
+    assert.equal(intentMarker(saved.lastRecovery.previousIntent), saved.lastRecovery.intent,
+      'the joined marker alone would call this the same attempt');
+    const corruptRecord = structuredClone(saved);
+    const h = harness({ saved }); h.current = 1; h.workflow = { profile: structuredClone(filter) }; await h.start();
+    assert.equal(h.status().held, 'unresolved_write_intent');
+    const review = (await h.view()).recovery;
+    assert.equal(review.available, true); assert.equal(review.mode, 'auto'); assert.equal(review.command, 2);
+    const writes = h.writes.length;
+    const response = await h.recover({ ...recoveryBody(review), action: 'reload_current' }), body = JSON.parse(response.body);
+    assert.equal(response.status, 409, 'a coerced shot id is never a successful recovery');
+    assert.equal(body.error, 'invalid_recovery_audit'); assert.equal(body.field, 'previousIntent'); assert.equal(body.saved, undefined);
+    const after = h.stored();
+    assert.equal(h.writes.length, writes, 'nothing is durably rewritten before the audit is proven readable');
+    assert.deepEqual(after, corruptRecord, 'the retained intent, ledger and audit stay exactly as they were');
+    assert.deepEqual(after.pending, corruptRecord.pending, 'the retained intent is not consumed');
+    assert.deepEqual(after.machines['s:' + serial], record, 'the ledger is not rebased');
+    assert.equal(h.posts.length, 0, 'recovery never sends a calibration command');
+    assert.equal(h.status().profile.mode, 'auto'); assert.equal(h.status().unresolvedIntent.command, 2);
+  });
+}
+
+// The two shapes the controller itself writes stay readable, including a legacy record that never recorded a shot
+// at all: an absent shot id and an explicit null both mean "this change had no shot".
+test('a prepared reload keeps retrying when a legacy audit leaves the shot id absent and the intent records none', async () => {
+  const { saved, filter } = await preparedReload('auto');
+  delete saved.lastRecovery.previousIntent.shotId; // a legacy record never carried a shot
+  const h = harness({ saved }); h.current = 1; h.workflow = { profile: structuredClone(filter) }; await h.start();
+  assert.equal(h.status().held, 'unresolved_write_intent');
+  const retry = await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' });
+  assert.equal(retry.status, 200); assert.equal(JSON.parse(retry.body).saved, true);
+  const audit = h.stored().lastRecovery, m = h.stored().machines['s:' + serial];
+  assert.equal(audit.status, 'completed'); assert.equal(audit.attempts, 2);
+  assert.equal(audit.previousIntent.shotId, undefined, 'an absent shot id is carried forward as absent');
+  assert.equal(h.stored().pending, null); assert.equal(h.posts.length, 0);
+  assert.equal(m.expected, 1); assert.deepEqual(m.programs[saved.lastRecovery.profileKey], { target: 1, applied: 1 });
+});
+
+test('a prepared legacy reload keeps retrying when the audit records no shot id and the intent omits it', async () => {
+  const { saved, filter } = await preparedShot(omittedShotId);
+  saved.lastRecovery.previousIntent.shotId = null; // the same absence, recorded explicitly
+  const h = harness({ saved }); h.current = 1; h.workflow = { profile: structuredClone(filter) }; await h.start();
+  assert.equal(h.status().held, 'unresolved_write_intent');
+  const retry = await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' });
+  assert.equal(retry.status, 200); assert.equal(JSON.parse(retry.body).saved, true);
+  const audit = h.stored().lastRecovery;
+  assert.equal(audit.status, 'completed'); assert.equal(audit.attempts, 2);
+  assert.equal(audit.previousIntent.shotId, null);
+  assert.equal(h.stored().pending, null); assert.equal(h.posts.length, 0);
+  assert.equal(h.stored().machines['s:' + serial].expected, 1);
+});
+
+for (const [label, shotId] of [['the same shot name', 'left'], ['the same empty shot name', '']]) {
+  test(`a prepared reload whose audit keeps ${label} still retries`, async () => {
+    const { saved, filter } = await preparedShot(shotId);
+    assert.equal(saved.lastRecovery.previousIntent.shotId, shotId);
+    const h = harness({ saved }); h.current = 1; h.workflow = { profile: structuredClone(filter) }; await h.start();
+    assert.equal(h.status().held, 'unresolved_write_intent');
+    const review = (await h.view()).recovery;
+    assert.equal(review.available, true); assert.equal(review.mode, 'auto'); assert.equal(review.command, 2);
+    const retry = await h.recover({ ...recoveryBody(review), action: 'reload_current' });
+    assert.equal(retry.status, 200); assert.equal(JSON.parse(retry.body).saved, true);
+    const audit = h.stored().lastRecovery, m = h.stored().machines['s:' + serial];
+    assert.equal(audit.status, 'completed'); assert.equal(audit.attempts, 2);
+    assert.equal(audit.previousIntent.shotId, shotId);
+    assert.equal(h.stored().pending, null); assert.equal(h.posts.length, 0);
+    assert.equal(m.expected, 1); assert.deepEqual(m.programs[saved.lastRecovery.profileKey], { target: 1, applied: 1 });
+  });
+}
+
+test('a damaged audit on an unrelated finished record never blocks a new reload', async () => {
+  const { h, filter, filterKey } = await reloadHold('auto');
+  await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' });
+  const saved = h.stored();
+  assert.equal(saved.lastRecovery.status, 'completed'); assert.equal(saved.pending, null);
+  saved.lastRecovery.previousIntent = 'corrupt'; saved.lastRecovery.previous = []; saved.lastRecovery.attempts = 'bad';
+  saved.pending = { serial, model: 'DE1Pro', key: filterKey, shotId: null, expected: 2, command: 2, kind: 'learning' };
+  const next = harness({ saved }); next.current = 2; next.workflow = { profile: structuredClone(filter) }; await next.start();
+  const review = (await next.view()).recovery;
+  assert.equal(review.available, true); assert.equal(review.value, 2);
+  const response = await next.recover({ ...recoveryBody(review), action: 'reload_current' });
+  assert.equal(response.status, 200); assert.equal(JSON.parse(response.body).saved, true);
+  assert.equal(next.posts.length, 0);
+  const audit = next.stored().lastRecovery;
+  assert.equal(audit.status, 'completed'); assert.equal(audit.attempts, 1, 'a finished record is replaced, not retried');
+  assert.equal(audit.previousIntent.command, 2); assert.equal(audit.previousIntent.kind, 'learning');
+  assert.equal(audit.previousIntent.key, filterKey); assert.equal(audit.previousIntent.serial, serial);
+  assert.deepEqual(audit.previous.program, { target: 1, applied: 1 }); assert.equal(audit.previous.override, null);
+  assert.equal(audit.previous.expected, 1);
+});
+
 test('a finished reload audit is never lent to a later, byte-identical pause', async () => {
   const { h, filter, filterKey } = await reloadHold('auto');
   await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' });
@@ -537,6 +949,40 @@ test('a busy round-trip also ends the earlier recovery consent', async () => {
   assert.equal((await h.recover({ ...recoveryBody(review), action: 'reload_current' })).status, 409);
   assert.deepEqual(h.stored(), before); assert.equal(h.posts.length, 0); assert.ok(h.status().unresolvedIntent);
   assert.equal((await h.recover({ ...recoveryBody(back), action: 'reload_current' })).status, 200);
+});
+
+test('a review consent is mode-bound: a partially prepared legacy recovery cannot turn an Automatic consent into Manual', async () => {
+  const { h } = await reloadHold('auto');
+  h.current = 2; // the machine reads the paused command again, so a matching-only legacy recovery becomes possible
+  h.failStorage = true;
+  await h.recover({ ...recoveryBody((await h.view()).recovery), action: 'reload_current' });
+  h.failStorage = false;
+  assert.equal(h.status().held, 'storage_write_failed'); assert.equal(h.status().profile.mode, 'auto');
+  const consent = (await h.view()).recovery, oldBody = { ...recoveryBody(consent), action: 'reload_current' };
+  assert.equal(consent.mode, 'auto'); assert.equal(consent.value, 2);
+  // A stale 2.0.1 page sends no action: the matching intent prepares its Manual completion, the completion write fails.
+  h.failStorageAt = h.storageAttempts + 2;
+  assert.ok((await h.recover(recoveryBody(consent))).status >= 400);
+  h.failStorageAt = null;
+  assert.equal(h.status().held, 'storage_write_failed'); assert.equal(h.status().profile.mode, 'manual');
+  assert.ok(h.stored().pending, 'the old intent stays durable'); assert.equal(h.posts.length, 0);
+  const prepared = h.stored();
+  assert.equal(prepared.machines['s:' + serial].overrides['t:Filter3'], 2);
+  const fresh = (await h.view()).recovery, again = (await h.view()).recovery;
+  assert.equal(fresh.mode, 'manual'); assert.equal(fresh.value, 2); assert.equal(fresh.available, true);
+  assert.notEqual(fresh.context, consent.context, 'a profile mode change must end the earlier review consent');
+  assert.equal(again.context, fresh.context, 'unchanged polls keep one review context');
+  // The Automatic consent is void: it may not be replayed as a Manual reload.
+  assert.equal((await h.recover(oldBody)).status, 409);
+  assert.deepEqual(h.stored(), prepared); assert.equal(h.posts.length, 0);
+  const response = await h.recover({ ...recoveryBody(again), action: 'reload_current' }), body = JSON.parse(response.body);
+  assert.equal(response.status, 200); assert.equal(body.saved, true); assert.equal(body.mode, 'manual');
+  assert.equal(h.status().held, null); assert.equal(h.status().profile.mode, 'manual');
+  assert.equal(h.status().profile.manualValue, 2); assert.equal(h.posts.length, 0, 'recovery never sends a calibration command');
+  const m = h.stored().machines['s:' + serial];
+  assert.equal(m.overrides['t:Filter3'], 2); assert.equal(m.expected, 2); assert.equal(h.stored().pending, null);
+  assert.equal(h.stored().lastRecovery.authority, 'operator_confirmed_reload_current');
+  assert.equal(h.stored().lastRecovery.mode, 'manual');
 });
 
 test('unchanged polls keep one review context so a normal confirmation still works', async () => {

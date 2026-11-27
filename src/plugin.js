@@ -7,7 +7,7 @@ function createPlugin(host) {
   var generation = 0, activeKey = null, activeTitle = null, pending = null, waiting = null, retryQueued = false, lastRetry = 0, controlBusy = false;
   var chain = Promise.resolve(), decisions = [], db = empty();
   var workflowCheck = null, workflowRevision = 0, recovering = false, recovery = null;
-  var consentEpoch = 0, observed = null;
+  var consentEpoch = 0, observed = null, consentedMode = null;
   var session = Date.now().toString(36) + '-' + Math.random().toString(36), revision = 0;
   var ui = createFlowCalibrationUI(host, get, status, function () { return expectedSerial; }, models);
 
@@ -78,7 +78,34 @@ function createPlugin(host) {
     return value && typeof value === 'object' && typeof value.serial === 'string' && value.serial !== '' && value.serial !== '0' &&
       typeof value.key === 'string' && value.key.indexOf('p:') === 0 && grid(value.expected) && grid(value.command) &&
       ['learning', 'manual', 'baseline', 'recall'].indexOf(value.kind) >= 0 &&
-      (value.model === undefined || models.indexOf(value.model) >= 0);
+      (value.model === undefined || models.indexOf(value.model) >= 0) &&
+      // The controller records a shot name or no shot at all, so any other shape is unreadable, not provenance.
+      (value.shotId === undefined || value.shotId === null || typeof value.shotId === 'string');
+  }
+  // Intent identity is compared field by field. The persisted marker joins its fields with a separator that a
+  // profile key or shot id may itself contain, so two different intents can share one marker string.
+  // A shot id is a name or the absence of one: an omitted field and null both mean "no shot", while an empty
+  // name is still a recorded name and no value is ever coerced into matching another.
+  function sameIntent(a, b) {
+    function shot(value) { return value === null || value === undefined ? null : value; }
+    return !!a && !!b && a.serial === b.serial && (a.model === undefined ? '' : a.model) === (b.model === undefined ? '' : b.model) &&
+      a.key === b.key && shot(a.shotId) === shot(b.shotId) && a.expected === b.expected && a.command === b.command && a.kind === b.kind;
+  }
+  // A retried reload reuses the original intent and the profile state that the failed preparation recorded.
+  // That reuse is only safe while the record still reads back as this same attempt, including the original
+  // intent itself: a grid-valid but different command, expected value, kind, key or shot id must never replace it.
+  function auditProblem(audit, intent) {
+    function object(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+    function stamp(value) { return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value) && isFinite(Date.parse(value)); }
+    var original = audit.previousIntent, replaced = audit.previous;
+    if (!validIntent(original) || !sameIntent(original, intent)) return 'previousIntent';
+    if (!object(replaced) || !grid(replaced.expected) || !grid(replaced.baseline)) return 'previous';
+    if (replaced.program !== null && (!object(replaced.program) || !range(replaced.program.target) ||
+        (replaced.program.applied !== null && !grid(replaced.program.applied)))) return 'previous.program';
+    if (replaced.override !== null && !grid(replaced.override)) return 'previous.override';
+    if (!Number.isInteger(audit.attempts) || audit.attempts < 1) return 'attempts';
+    if (!stamp(audit.firstAt)) return 'firstAt';
+    return null;
   }
   function validate(value) {
     if (!value || [1, 2].indexOf(value.version) < 0 || !value.machines || typeof value.machines !== 'object' || Array.isArray(value.machines) ||
@@ -319,15 +346,20 @@ function createPlugin(host) {
         await settleWorkflow();
         var s = await snapshot(); syncProfile(s);
         var intent = db.pending, m = record(s), manual = m && m.overrides ? m.overrides[manualKey(s.title)] : undefined;
+        var mode = manual === undefined ? 'auto' : 'manual';
         // A differing read-back is no longer a blocking reason: the explicit reload request accepts it.
         var reason = !validIntent(intent) ? 'invalid_saved_state'
           : recovering || controlBusy || waiting ? 'recovery_busy'
           : intent.serial !== s.serial || (intent.model && intent.model !== s.model) ? 'wrong_machine'
           : !s.safe ? 'machine_busy'
           : intent.key !== s.key ? 'recovery_profile_mismatch' : null;
+        // A review is mode-bound: a profile mode change ends the earlier confirmation, even when nothing
+        // else in the observed machine state moved and even if the change came from a partial recovery.
+        if (consentedMode !== null && consentedMode !== mode) consentEpoch++;
+        consentedMode = mode;
         recovery = { available: !reason, reason: reason, action: 'reload_current', context: reviewContext(), profileKey: s.key, profileTitle: s.title,
           serial: s.serial, model: s.model, value: s.value, command: intent.command, intent: intentId(intent),
-          mode: manual === undefined ? 'auto' : 'manual',
+          mode: mode,
           requiresSettledConfirmation: true };
       } catch (error) {
         var code = String(error.message || error); consentEpoch++; ui.changed(code);
@@ -366,11 +398,22 @@ function createPlugin(host) {
       if (reload && mode !== reviewed.mode) { code = 409; result = { error: 'recovery_context_changed' }; return; }
       if (!reload) mode = 'manual';
       var prepared = JSON.parse(JSON.stringify(db)), m = prepared.machines['s:' + s.serial];
-      // An explicit retry of the same retained intent must not overwrite what the first attempt replaced.
-      var prior = reload && db.lastRecovery && db.lastRecovery.authority === 'operator_confirmed_reload_current' &&
-        db.lastRecovery.status === 'prepared' && db.lastRecovery.intent === intent ? db.lastRecovery : null;
+      // An explicit retry of the same retained intent must not overwrite what the first attempt replaced, and a
+      // reload record that survived only in part is still that same attempt: it is validated, never discarded.
+      var audit = reload && db.lastRecovery && db.lastRecovery.authority === 'operator_confirmed_reload_current' ? db.lastRecovery : null;
+      // A finished reload is history: it is never lent to a later pause, even one repeating its intent exactly.
+      if (audit && audit.status === 'completed') audit = null;
+      var same = !!audit && (audit.intent === intent ||
+        (validIntent(audit.previousIntent) && sameIntent(audit.previousIntent, originalIntent)));
+      // That same record must still read back as the prepared attempt the retry is meant to resume.
+      var partial = !same ? null : audit.status !== 'prepared' ? 'status' : audit.intent !== intent ? 'intent' : null;
+      if (partial) { code = 409; result = { error: 'invalid_recovery_audit', field: partial }; return; }
+      var prior = same ? audit : null;
+      // Provenance that cannot be read back is never reused and never replaced by rebuilt values.
+      var unreadable = prior ? auditProblem(prior, originalIntent) : null;
+      if (unreadable) { code = 409; result = { error: 'invalid_recovery_audit', field: unreadable }; return; }
       // Audit the selected profile state this reload replaces, not only the old intent.
-      var previous = !reload ? null : prior && prior.previous ? prior.previous : { expected: m.expected, baseline: m.baseline,
+      var previous = !reload ? null : prior ? prior.previous : { expected: m.expected, baseline: m.baseline,
         program: m.programs[s.key] === undefined ? null : JSON.parse(JSON.stringify(m.programs[s.key])),
         override: m.overrides[manualKey(s.title)] === undefined ? null : m.overrides[manualKey(s.title)] };
       await fenceHistory(m);
@@ -386,9 +429,9 @@ function createPlugin(host) {
         if (mode === 'manual') m.overrides[manualKey(s.title)] = s.value;
         else m.programs[s.key] = { target: s.value, applied: s.value };
       } else m.overrides[manualKey(s.title)] = s.value;
-      prepared.lastRecovery = reload ? { previousIntent: prior && prior.previousIntent ? prior.previousIntent : JSON.parse(JSON.stringify(originalIntent)),
-        authority: 'operator_confirmed_reload_current', status: 'prepared', intent: intent, attempts: (prior ? prior.attempts || 0 : 0) + 1,
-        firstAt: prior && prior.firstAt ? prior.firstAt : at,
+      prepared.lastRecovery = reload ? { previousIntent: prior ? prior.previousIntent : JSON.parse(JSON.stringify(originalIntent)),
+        authority: 'operator_confirmed_reload_current', status: 'prepared', intent: intent, attempts: prior ? prior.attempts + 1 : 1,
+        firstAt: prior ? prior.firstAt : at,
         mode: mode, serial: s.serial, profileKey: s.key, profileTitle: s.title, value: s.value, command: originalIntent.command,
         previous: previous, cutoff: cutoff, confirmedSettled: true, calibrationCommandSent: false, at: at }
         : { previousIntent: JSON.parse(JSON.stringify(originalIntent)), authority: 'operator_confirmed_manual',
