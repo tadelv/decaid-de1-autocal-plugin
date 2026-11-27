@@ -9,7 +9,7 @@ const { buildPlugin } = require('../tools/build-plugin');
 function harness() {
   const calls = [], pushes = [];
   const state = { enabled: true, ready: true, stopped: false, held: null, pending: null, unresolvedIntent: null,
-    expectedSerial: 'target', canSetMode: true, context: 'epoch-1', profile: { key: 'filter3', title: 'Filter 3', mode: 'auto', manualValue: null }, machines: { 's:target': { expected: .881 } }, decisions: [
+    expectedSerial: 'target', canSetMode: true, context: 'epoch-1', profile: { key: 'filter3', title: 'Filter 3', mode: 'auto', manualValue: null, rememberedManual: null }, machines: { 's:target': { expected: .881 } }, decisions: [
       { reason: 'new_target', shotId: 'last-shot', historicalMultiplier: .956,
         fit: { fitted: true, multiplier: .881344, coverageSeconds: 4.5, warnings: [] } },
       { reason: 'applied_verified', previous: .956, applied: .881, at: '2026-11-26T12:00:00Z' },
@@ -119,7 +119,7 @@ function browser(h = harness()) {
     model: { value: .75, mode: 'Auto', readAt: '2026-11-26T12:00:00Z',
       lastTarget: .76, lastApplied: .75, coverage: 4.5, shotId: '<img onerror=bad()>', warnings: ['timing_sensitive'],
       warningText: ['Flow timing may affect the estimate.'], resultText: 'The new value was checked on the machine.', supportCode: 'applied_verified',
-      profile: { key: 'filter3', title: 'Filter 3', mode: 'auto', manualValue: null }, context: 'epoch-1', canSetMode: true } };
+      profile: { key: 'filter3', title: 'Filter 3', mode: 'auto', manualValue: null, rememberedManual: null }, context: 'epoch-1', canSetMode: true } };
   const document = { hidden: false, getElementById: id => elements[id],
     addEventListener(type, fn) { documentEvents[type] = fn; }, removeEventListener(type) { delete documentEvents[type]; } };
   const window = { parent: { postMessage: m => messages.push(m) }, location: { href: 'http://tablet:8080/api/v1/plugins/test/ui?embed=1' },
@@ -145,9 +145,11 @@ function browser(h = harness()) {
         if (b.failCommand) throw new Error('Request not confirmed. Refresh before retrying.');
         if (b.commandStatus) return { ok: false, status: b.commandStatus, json: async () => ({ error: 'raw_backend_error_identifier' }) };
         b.model.profile = { ...b.model.profile, mode: command.mode, manualValue: command.mode === 'manual' ? command.value : null };
+        if (command.mode === 'manual') b.model.profile.rememberedManual = command.value;
         b.model.value = command.mode === 'manual' ? command.value : .75;
         b.model.context = 'epoch-' + (b.commands.length + 1);
-        return { ok: true, json: async () => ({ saved: true, profile: b.model.profile.title }) };
+        return { ok: true, json: async () => ({ saved: true, profile: b.model.profile.title, mode: command.mode,
+          value: b.model.value }) };
       }
       assert.equal(route, '/api/v1/plugins/test/view'); assert.equal(init.method, 'GET');
       if (b.offline) throw new Error('offline');
@@ -182,9 +184,24 @@ test('manual state exposes the saved setting separately from the machine value a
   h.state.pending = {}; assert.equal((await h.model()).mode, 'Manual ×2.000 saved — not applied yet');
 });
 
+test('a remembered Manual value stays visible and offered while Automatic shows the live reading', async () => {
+  const h = harness(); h.state.profile.rememberedManual = 2;
+  const model = await h.model();
+  assert.equal(model.value, .881); assert.equal(model.profile.mode, 'auto');
+  assert.equal(model.profile.manualValue, null); assert.equal(model.profile.rememberedManual, 2);
+  assert.match(model.controlsHelp, /Auto starts from the value your machine shows now/);
+  assert.match(model.controlsHelp, /Saved Manual ×2\.000 is kept/);
+  assert.equal(model.automatic, true);
+  const html = h.page().body;
+  assert.match(html, /Auto starts from the value your machine shows now, then uses new shots\./);
+  assert.ok(!/Auto restores the saved automatic/.test(html));
+  h.state.profile.mode = 'manual'; h.state.profile.manualValue = 2;
+  assert.ok(!/Saved Manual/.test((await h.model()).controlsHelp), 'an active Manual choice needs no reminder');
+});
+
 test('browser submits explicit manual/Auto commands, validates decimals and keeps draft bound to its original context', async () => {
   const b = browser(), e = b.elements; await new Promise(resolve => setImmediate(resolve));
-  assert.equal(e['use-auto'].disabled, true);
+  assert.equal(e['use-auto'].disabled, false, 'an explicit Automatic restart stays available');
   for (const bad of ['2.001', '.349', '1.0001', 'invalid']) {
     e['manual-value'].value = bad; e['manual-value'].listeners.input();
     await e['override-form'].listeners.submit({ preventDefault() {} });
@@ -197,6 +214,7 @@ test('browser submits explicit manual/Auto commands, validates decimals and keep
   await e['use-auto'].listeners.click();
   assert.deepEqual(b.commands[1], { mode: 'auto', profileKey: 'filter3', context: 'epoch-2' });
   assert.equal(e.value.textContent, '×0.750');
+  assert.equal(e['action-message'].textContent, 'Automatic selected for Filter 3. It starts from ×0.750; no change was sent.');
 
   e['manual-value'].value = '1.900'; e['manual-value'].listeners.input();
   b.model.profile = { key: 'other', title: 'Other profile', mode: 'auto', manualValue: null }; b.model.context = 'new-context';

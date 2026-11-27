@@ -21,7 +21,7 @@ function harness(options = {}) {
   const h = { current: 1.13, state: 'idle', workflow: { profile: structuredClone(profile) },
     machine: { model: 'DE1Pro', serialNumber: serial }, shots: options.shots || [shot()],
     history: [{ timestamp: '2026-11-26T12:00:00.000000' }], calls, writes, posts,
-    failStorage: false, failStorageAt: null, storageAttempts: 0, failPost: false, wrongReadback: false, hook: null,
+    failStorage: false, failStorageAt: null, storageAttempts: 0, failPost: false, wrongReadback: false, hook: null, ackHook: null,
     status: () => JSON.parse(plugin.__httpRequestHandler({ endpoint: 'status' }).body),
     stored: () => structuredClone(stored),
     async mode(mode, value, extra = {}) {
@@ -50,7 +50,11 @@ function harness(options = {}) {
     h.storageAttempts++;
     if (h.failStorage || h.storageAttempts === h.failStorageAt) throw new Error('disk failure');
     stored = structuredClone(command.data); writes.push(stored);
-    if (options.ack !== false && options.ackAt !== h.storageAttempts) queueMicrotask(() => plugin.onEvent({ name: 'storageWrite', payload: structuredClone(stored) }));
+    if (options.ack !== false && options.ackAt !== h.storageAttempts) queueMicrotask(() => {
+      plugin.onEvent({ name: 'storageWrite', payload: structuredClone(stored) });
+      // Runs after the acknowledgement and before the request continues, so a real-world change can land in that window.
+      if (h.ackHook) h.ackHook();
+    });
   } };
   plugin = vm.runInNewContext(payload.plugin + '\ncreatePlugin', {
     setTimeout: (fn, delay) => setTimeout(fn, options.ack === false || options.ackAt ? 5 : delay), clearTimeout,
@@ -1272,13 +1276,193 @@ test('manual multiplier stays fixed per profile; automatic records survive manua
   assert.equal(restart.current, 2);
 });
 
-test('Auto restores the last automatic value, then learns only future shots', async () => {
+test('Auto starts from the current machine value, then learns only future shots', async () => {
   const h = harness(); await h.start(); await h.store(); await h.mode('manual', 2);
   const manual = shot('manual-shot', .7, 2); h.shots.push(manual);
   h.history = [{ timestamp: manual.timestamp }]; // Delayed manual-shot event has not arrived yet.
-  assert.equal((await h.mode('auto')).status, 200); assert.equal(h.current, 1.45);
-  assert.equal(h.status().profile.mode, 'auto'); await h.store('manual-shot'); assert.equal(h.current, 1.45);
-  h.shots.push(shot('future', 1.6, 3)); await h.store('future'); assert.equal(h.current, 1.6);
+  const writes = h.posts.length;
+  assert.equal((await h.mode('auto')).status, 200); assert.equal(h.current, 2);
+  assert.equal(h.posts.length, writes, 'selecting Automatic recalls and sends nothing');
+  assert.equal(h.status().profile.mode, 'auto'); await h.store('manual-shot'); assert.equal(h.current, 2);
+  const future = shot('future', 1.6);
+  future.timestamp = new Date(h.stored().machines['s:' + serial].recoveryCutoff + 60000).toISOString();
+  h.shots.push(future); await h.store('future'); assert.equal(h.current, 1.6);
+});
+
+// Reported case: the saved Manual is 2.000, the machine reads 1.000 and Automatic used to restore 2.000.
+test('an explicit Auto selection starts from the live value, sends no calibration command and keeps the saved Manual', async () => {
+  const h = harness(); await h.start(); await h.store();
+  assert.ok(Math.abs(h.current - 1.45) < .001); // an older automatic estimate exists
+  assert.equal((await h.mode('manual', 2)).status, 200); assert.equal(h.current, 2);
+  const writes = h.posts.length;
+  h.current = 1; // the machine now reads 1.000
+  const response = await h.mode('auto'), result = JSON.parse(response.body);
+  assert.equal(response.status, 200);
+  assert.deepEqual(result, { saved: true, profile: 'Trial', mode: 'auto', value: 1, calibrationCommandSent: false });
+  assert.equal(h.posts.length, writes, 'selecting Automatic must never send a calibration command');
+  assert.equal(h.current, 1, 'the live value is left alone');
+  const m = h.stored().machines['s:' + serial];
+  assert.equal(m.expected, 1); assert.equal(m.baseline, 1.13, 'the machine baseline is not rebased');
+  assert.equal(m.overrides['t:Trial'], undefined);
+  assert.deepEqual(m.manual, { 't:Trial': 2 }, 'the saved Manual value is remembered, not overwritten');
+  assert.deepEqual(Object.values(m.programs), [{ target: 1, applied: 1 }]);
+  // A value sent by a stale or modified page is ignored for Automatic: the live reading wins.
+  const ignored = JSON.parse((await h.mode('auto', 1.9)).body);
+  assert.equal(ignored.value, 1); assert.equal(h.posts.length, writes);
+  assert.deepEqual(h.stored().machines['s:' + serial].manual, { 't:Trial': 2 });
+  const s = h.status();
+  assert.equal(s.profile.mode, 'auto'); assert.equal(s.profile.manualValue, null); assert.equal(s.profile.rememberedManual, 2);
+  assert.equal(s.held, null); assert.equal(s.unresolvedIntent, null);
+  const view = await h.view(); // a fresh read keeps the remembered value
+  assert.equal(view.profile.rememberedManual, 2); assert.equal(view.profile.mode, 'auto');
+});
+
+test('an explicit Auto restart uses the live value even while already Automatic and fences older shots', async () => {
+  const h = harness(); await h.start(); await h.store();
+  assert.ok(h.current > 1.4); const writes = h.posts.length;
+  // A newer shot is recorded but its event has not arrived, so an older shot must not look new after this restart.
+  h.history = [{ timestamp: '2026-11-26T12:00:06.000000' }];
+  h.shots.push(shot('late', .7, 3));
+  h.current = 1.37;
+  const response = await h.mode('auto');
+  assert.equal(response.status, 200); assert.equal(h.posts.length, writes); assert.equal(h.current, 1.37);
+  const m = h.stored().machines['s:' + serial];
+  assert.equal(m.expected, 1.37);
+  assert.deepEqual(Object.values(m.programs), [{ target: 1.37, applied: 1.37 }], 'not the older estimate or the baseline');
+  await h.store('late');
+  assert.equal(h.posts.length, writes, 'a shot that predates the explicit Auto start cannot teach it');
+  assert.ok(h.status().decisions.some(d => d.reason === 'old_or_duplicate_shot'));
+  const next = shot('next', 1.6);
+  next.timestamp = new Date(m.recoveryCutoff + 60000).toISOString();
+  h.shots.push(next); await h.store('next');
+  assert.equal(h.posts.length, writes + 1, 'a genuinely new shot still learns'); assert.ok(h.current > 1.5);
+});
+
+// AC1: an empty history leaves nothing to fence against, so the start needs its own monotonic fence.
+test('a delayed pre-start shot cannot teach Automatic even when the history was empty', async () => {
+  const h = harness(); h.history = []; await h.start();
+  assert.equal(h.stored().machines['s:' + serial].highWater, -1, 'no recorded history to fence against yet');
+  h.current = 1.4;
+  const startedAt = Date.now();
+  assert.equal((await h.mode('auto')).status, 200);
+  const writes = h.posts.length, cutoff = h.stored().machines['s:' + serial].recoveryCutoff;
+  // Recorded a minute before the explicit start, and its event only arrives afterwards.
+  const delayed = shot('delayed', .7); delayed.timestamp = new Date(startedAt - 60000).toISOString();
+  h.shots.push(delayed); await h.store('delayed');
+  assert.equal(h.posts.length, writes, 'a shot recorded before the explicit start teaches nothing');
+  assert.equal(h.current, 1.4); assert.equal(h.status().profile.mode, 'auto');
+  assert.ok(h.status().decisions.some(d => d.reason === 'old_or_duplicate_shot'));
+  assert.equal(typeof cutoff, 'number'); assert.ok(cutoff >= startedAt, 'the start keeps a monotonic fence');
+  // Controlled timestamp after the stored fence; a genuinely new shot still teaches.
+  const fresh = shot('fresh', 1.6); fresh.timestamp = new Date(cutoff + 60000).toISOString();
+  h.shots.push(fresh); await h.store('fresh');
+  assert.equal(h.posts.length, writes + 1, 'a genuinely new shot after the start still learns');
+  assert.ok(h.current > 1.5);
+});
+
+test('Auto never inherits authority from polls or Manual requests and never clears a held cause', async () => {
+  const h = harness(); await h.start(); await h.mode('manual', 2);
+  const state = JSON.stringify(h.stored()), writes = h.writes.length;
+  h.current = .95;
+  const view = await h.view();
+  assert.equal(view.value, .95); assert.equal(view.outsideUpdater, true);
+  assert.equal(JSON.stringify(h.stored()), state); assert.equal(h.writes.length, writes);
+  // A Manual request still pauses on an external change instead of adopting it.
+  assert.equal((await h.mode('manual', 2)).status, 503);
+  assert.equal(h.status().held, 'external_change_detected'); assert.equal(h.current, .95);
+  assert.equal((await h.mode('auto')).status, 409, 'Auto cannot clear an existing hold');
+  assert.equal(h.status().held, 'external_change_detected'); assert.equal(h.posts.length, 1);
+  // A durable unresolved intent still requires the existing recovery and cannot be dropped by Auto.
+  const ambiguous = harness(); await ambiguous.start(); ambiguous.failPost = true;
+  assert.equal((await ambiguous.mode('manual', 2)).status, 503);
+  const intent = ambiguous.stored().pending; assert.ok(intent);
+  assert.equal((await ambiguous.mode('auto')).status, 409);
+  assert.deepEqual(ambiguous.stored().pending, intent); assert.equal(ambiguous.status().profile.mode, 'manual');
+});
+
+test('2.0.2 saved state gains the remembered Manual additively, while malformed memories fail closed', async () => {
+  const h = harness(); await h.start(); await h.mode('manual', 2);
+  const legacy = h.stored(); delete legacy.machines['s:' + serial].manual;
+  assert.equal(legacy.version, 2); assert.deepEqual(legacy.machines['s:' + serial].overrides, { 't:Trial': 2 });
+  const restart = harness({ saved: legacy }); restart.current = 2; await restart.start();
+  assert.equal(restart.status().profile.mode, 'manual'); assert.equal(restart.status().profile.rememberedManual, 2);
+  assert.deepEqual(restart.stored().machines['s:' + serial].manual, { 't:Trial': 2 });
+  assert.equal(restart.posts.length, 0);
+  for (const manual of [null, [], { bad: 2 }, { 't:bad': 3 }, { 't:bad': 1.0001 }]) {
+    const corrupt = h.stored(); corrupt.machines['s:' + serial].manual = manual;
+    const bad = harness({ saved: corrupt }); await bad.start();
+    assert.equal(bad.status().held, 'invalid_saved_state'); assert.equal(bad.posts.length, 0);
+    assert.equal(bad.status().profile, null);
+  }
+});
+
+test('profile switches recall the automatic value, never the inactive Manual memory', async () => {
+  const h = harness(); await h.start(); await h.store();
+  assert.equal((await h.mode('manual', 2)).status, 200);
+  h.current = 1;
+  assert.equal((await h.mode('auto')).status, 200);
+  const writes = h.posts.length;
+  await h.select({ ...profile, title: 'Other program' });
+  assert.equal(h.current, 1.13, 'the unchanged baseline fallback still recalls');
+  await h.select(profile);
+  assert.equal(h.current, 1, 'returning recalls the Auto starting value, not the remembered Manual 2.000');
+  assert.deepEqual(h.posts.slice(writes).map(p => p.flowMultiplier), [1.13, 1]);
+  assert.equal(h.status().profile.mode, 'auto'); assert.equal(h.status().profile.rememberedManual, 2);
+});
+
+// AC6: the acknowledged write proves the save, never the reading it started from.
+test('an Auto start that changes while the write is acknowledged fails clearly and never claims a start', async () => {
+  async function raced(mutate) {
+    const h = harness(); await h.start(); await h.mode('manual', 2);
+    h.current = 1;
+    const posts = h.posts.length;
+    h.ackHook = () => mutate(h); // lands after the acknowledgement, before the request continues
+    const response = await h.mode('auto');
+    return { h, response, body: JSON.parse(response.body), posts };
+  }
+  // A machine that moves on while the start is saved is no confirmed start from the value that was read.
+  const value = await raced(h => { h.current = 1.5; });
+  assert.equal(value.h.current, 1.5);
+  assert.equal(value.response.status, 409, 'a changed reading is never reported as a confirmed start: ' + value.response.body);
+  assert.deepEqual(value.body, { error: 'stale_context' });
+  assert.equal(value.h.posts.length, value.posts, 'a failed start sends no calibration command');
+  assert.equal(value.h.status().decisions[0].reason, 'auto_start_not_confirmed');
+  assert.equal(value.h.status().held, null);
+  const record = value.h.stored().machines['s:' + serial];
+  assert.equal(record.expected, 1, 'the acknowledged record is kept as written; there is no atomic rollback');
+  // The committed state is read back honestly: a reload rebases to the live value and sends nothing.
+  const reload = harness({ saved: value.h.stored() }); reload.current = 1.5; await reload.start();
+  assert.equal(reload.status().held, null); assert.equal(reload.status().profile.mode, 'auto');
+  assert.equal(reload.stored().machines['s:' + serial].expected, 1.5); assert.equal(reload.posts.length, 0);
+  // A profile that changes in the same window is not started from either.
+  const switched = await raced(h => { h.workflow = { profile: structuredClone({ ...profile, title: 'Other program' }) }; });
+  assert.equal(switched.response.status, 409); assert.deepEqual(switched.body, { error: 'stale_context' });
+  assert.equal(switched.h.posts.length, switched.posts);
+  // A machine that is busy when the start is acknowledged reports busy instead of success.
+  const busy = await raced(h => { h.state = 'espresso'; });
+  assert.equal(busy.response.status, 409); assert.deepEqual(busy.body, { error: 'machine_busy' });
+  assert.equal(busy.h.posts.length, busy.posts);
+  // A different machine answering mid-write fails closed through the usual hold.
+  const wrong = await raced(h => { h.machine = { model: 'DE1Pro', serialNumber: 'other-de1' }; });
+  assert.equal(wrong.response.status, 503); assert.equal(wrong.body.error, 'wrong_machine'); assert.equal(wrong.body.saved, undefined);
+  assert.equal(wrong.h.status().held, 'wrong_machine'); assert.equal(wrong.h.posts.length, wrong.posts);
+  // An unloaded plugin never reports a start either.
+  const stopped = await raced(h => h.plugin.onUnload());
+  assert.equal(stopped.response.status, 409); assert.equal(stopped.body.saved, undefined);
+  assert.equal(stopped.h.posts.length, stopped.posts);
+});
+
+test('a confirmed Manual reload replaces the remembered Manual value; an Auto reload keeps it', async () => {
+  const auto = await reloadHold('auto');
+  const review = (await auto.h.view()).recovery;
+  assert.equal((await auto.h.recover({ ...recoveryBody(review), action: 'reload_current' })).status, 200);
+  assert.deepEqual(auto.h.stored().machines['s:' + serial].manual, { 't:D-Flow / Step-down': 1 });
+  const manual = await reloadHold('manual');
+  const manualReview = (await manual.h.view()).recovery;
+  assert.equal((await manual.h.recover({ ...recoveryBody(manualReview), action: 'reload_current' })).status, 200);
+  const m = manual.h.stored().machines['s:' + serial];
+  assert.equal(m.overrides['t:Filter3'], 1); assert.equal(m.manual['t:Filter3'], 1);
+  assert.equal(m.manual['t:D-Flow / Step-down'], 1);
 });
 
 test('manual-only profiles use exact multipliers including 1.000, preserve baseline and remain dose/grind independent', async () => {
@@ -1289,7 +1473,9 @@ test('manual-only profiles use exact multipliers including 1.000, preserve basel
   assert.equal(h.stored().machines['s:' + serial].baseline, 1.13);
   h.workflow.context = { targetDoseWeight: 15, grinderSetting: 'new grind' };
   await h.event('workflowUpdated', h.workflow); assert.equal(h.status().profile.manualValue, 1);
-  await h.mode('auto'); assert.equal(h.current, 1.13);
+  assert.equal((await h.mode('auto')).status, 200);
+  assert.equal(h.current, 1, 'Auto keeps the live value instead of recalling the baseline');
+  assert.equal(h.posts.length, 2); assert.equal(h.stored().machines['s:' + serial].baseline, 1.13);
 });
 
 test('recipe edits cannot silently remove a named profile manual override', async () => {
@@ -1300,7 +1486,10 @@ test('recipe edits cannot silently remove a named profile manual override', asyn
   assert.equal(h.current, 2); assert.equal(h.posts.length, 1);
   await h.select({ ...edited, title: 'Different profile' }); assert.equal(h.current, 1.13);
   await h.select(edited); assert.equal(h.current, 2);
-  await h.mode('auto'); assert.equal(h.current, 1.13, 'new recipe has no verified automatic value');
+  const writes = h.posts.length; await h.mode('auto');
+  assert.equal(h.current, 2, 'the edited recipe starts from the live value it already has');
+  assert.equal(h.posts.length, writes);
+  assert.deepEqual(h.stored().machines['s:' + serial].programs[h.status().profile.key], { target: 2, applied: 2 });
 });
 
 test('mode endpoint rejects invalid methods, values, wrong profile, stale and concurrent requests without mutation', async () => {
@@ -1358,12 +1547,18 @@ test('manual persistence and ambiguous dispatch failures fail closed, including 
 test('external changes cannot be overwritten by a saved manual value, even after restart', async () => {
   const h = harness(); await h.start(); await h.mode('manual', 2);
   h.current = .95;
+  // A repeated Manual request still checks ownership; a conflict is not an implicit overwrite approval.
+  assert.equal((await h.mode('manual', 2)).status, 503); assert.equal(h.current, .95); assert.equal(h.posts.length, 1);
+  assert.equal(h.status().held, 'external_change_detected');
   const restart = harness({ saved: h.stored() }); restart.current = .95; await restart.start();
   assert.equal(restart.status().held, 'external_change_detected'); assert.equal(restart.posts.length, 0);
-  // Leaving manual also checks ownership; a conflict is not an implicit overwrite approval.
-  assert.equal((await h.mode('auto')).status, 503); assert.equal(h.current, .95);
-  const again = harness({ saved: h.stored() }); again.current = .95; await again.start();
-  assert.equal(again.status().held, 'external_change_detected'); assert.equal(again.posts.length, 0);
+  // Automatic is the different, explicit choice to start from the live reading: it adopts it and sends nothing.
+  const auto = harness(); await auto.start(); await auto.mode('manual', 2); auto.current = .95;
+  assert.equal((await auto.mode('auto')).status, 200);
+  assert.equal(auto.current, .95); assert.equal(auto.posts.length, 1); assert.equal(auto.status().held, null);
+  assert.equal(auto.status().profile.mode, 'auto'); assert.equal(auto.status().profile.rememberedManual, 2);
+  const again = harness({ saved: auto.stored() }); again.current = .95; await again.start();
+  assert.equal(again.status().held, null); assert.equal(again.status().profile.mode, 'auto'); assert.equal(again.posts.length, 0);
 });
 
 test('v1 ledger migrates without losing authority/history; corrupt overrides fail closed', async () => {

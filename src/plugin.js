@@ -123,6 +123,10 @@ function createPlugin(host) {
       if (value.version === 1 && m.overrides === undefined) m.overrides = {};
       if (!m.overrides || typeof m.overrides !== 'object' || Array.isArray(m.overrides) ||
           Object.keys(m.overrides).some(function (p) { return p.indexOf('t:') !== 0 || !p.slice(2).trim() || !grid(m.overrides[p]); })) throw new Error('invalid_saved_state');
+      // 2.0.2 kept a Manual choice only as an active override; that value is also what the profile remembers.
+      if (m.manual === undefined) m.manual = Object.assign({}, m.overrides);
+      if (!m.manual || typeof m.manual !== 'object' || Array.isArray(m.manual) ||
+          Object.keys(m.manual).some(function (p) { return p.indexOf('t:') !== 0 || !p.slice(2).trim() || !grid(m.manual[p]); })) throw new Error('invalid_saved_state');
     });
     if (value.pending !== null && (!validIntent(value.pending) || !value.machines['s:' + value.pending.serial])) throw new Error('invalid_saved_state');
     value.version = 2;
@@ -180,7 +184,7 @@ function createPlugin(host) {
     if (!s.safe) throw new Error('enable_only_while_idle');
     activeKey = s.key; activeTitle = s.title;
     var m = record(s);
-    if (!m) m = db.machines['s:' + s.serial] = { baseline: s.value, expected: s.value, highWater: -1, consumed: [], programs: {}, overrides: {} };
+    if (!m) m = db.machines['s:' + s.serial] = { baseline: s.value, expected: s.value, highWater: -1, consumed: [], programs: {}, overrides: {}, manual: {} };
     if (m.expected !== s.value && m.overrides[manualKey(s.title)] !== undefined) throw new Error('external_change_detected');
     if (m.expected !== s.value) m.baseline = s.value;
     m.expected = s.value;
@@ -317,11 +321,24 @@ function createPlugin(host) {
         code = 409; result = { error: 'stale_context' }; return;
       }
       if (!s.safe) { code = 409; result = { error: 'machine_busy' }; return; }
-      if (!await check(s, token, { key: activeKey, serial: expectedSerial })) return;
       var m = record(s), manual = body.mode === 'manual' ? Math.round(body.value * 1000) / 1000 : undefined;
-      if (m.overrides[manualKey(s.title)] === manual) {
-        if (manual !== undefined && pending) await activate(token);
-        code = pending ? 202 : 200; result = { saved: true, profile: s.title, mode: body.mode, waiting: code === 202 }; return;
+      if (manual !== undefined) {
+        // A Manual choice may still not overwrite a value the machine changed outside this plugin.
+        if (!await check(s, token, { key: activeKey, serial: expectedSerial })) return;
+        if (m.overrides[manualKey(s.title)] === manual) {
+          if (pending) await activate(token);
+          code = pending ? 202 : 200; result = { saved: true, profile: s.title, mode: body.mode, waiting: code === 202 }; return;
+        }
+      } else {
+        // Starting Automatic is the operator's fresh choice to use the live reading, so queued workflow checks are
+        // settled first and the starting value is read again; nothing is recalled and nothing is sent.
+        await settleWorkflow();
+        s = await snapshot();
+        if (!alive(token) || body.context !== context() || s.key !== activeKey || s.serial !== expectedSerial) {
+          code = 409; result = { error: 'stale_context' }; return;
+        }
+        if (!s.safe) { code = 409; result = { error: 'machine_busy' }; return; }
+        m = record(s);
       }
       // Only shots newer than this explicit mode change may teach Auto again.
       var previousWater = m.highWater;
@@ -330,9 +347,42 @@ function createPlugin(host) {
         m.highWater = previousWater; code = 409; result = { error: 'stale_context' }; return;
       }
       generation++; token = generation; pending = null;
-      if (manual === undefined) delete m.overrides[manualKey(s.title)]; else m.overrides[manualKey(s.title)] = manual;
+      if (manual === undefined) {
+        // Rebase only this profile's automatic record and the expected machine value to the live multiplier. An older
+        // automatic value, the machine baseline and the remembered Manual value are never used as the starting point;
+        // the remembered Manual value is kept for an explicit later choice.
+        delete m.overrides[manualKey(s.title)];
+        m.expected = s.value;
+        m.programs[s.key] = { target: s.value, applied: s.value };
+        // Reuse the existing monotonic exclusion fence: a shot recorded before this explicit start must not teach it,
+        // even when the history was empty and the latest history entry is older than that delayed shot.
+        m.recoveryCutoff = Math.max(typeof m.recoveryCutoff === 'number' ? m.recoveryCutoff : -Infinity, Date.now());
+      } else {
+        m.overrides[manualKey(s.title)] = manual; m.manual[manualKey(s.title)] = manual;
+      }
       await save();
-      note('profile_mode_saved', { profile: s.title, profileKey: s.key, mode: body.mode, multiplier: manual === undefined ? null : manual });
+      if (manual === undefined) {
+        // The stored acknowledgement proves the write, not the reading it was based on: a value, profile, machine or
+        // control change that lands in the acknowledgement window is never reported as a successful start. The
+        // acknowledged record is left exactly as written (there is no atomic rollback); a reload rebases a machine
+        // that moved on, and an explicit retry reads the live value again.
+        var after = alive(token) ? await snapshot() : null, unconfirmed = null;
+        // The controller can be unloaded, or the workflow can move on and back, while that read is in flight: the
+        // reading alone never proves the live value it returns is still this operator's explicit Automatic choice.
+        if (!after || !alive(token) || after.key !== activeKey || after.key !== s.key) unconfirmed = 'stale_context';
+        else if (!after.safe) unconfirmed = 'machine_busy';
+        else if (after.value !== s.value) unconfirmed = 'stale_context';
+        if (unconfirmed) {
+          code = 409; result = { error: unconfirmed };
+          note('auto_start_not_confirmed', { profile: s.title, profileKey: s.key, value: s.value,
+            observed: after ? after.value : null, state: after ? after.state : null, error: unconfirmed, calibrationCommandSent: false });
+          return;
+        }
+        note('auto_started_from_current', { profile: s.title, profileKey: s.key, value: s.value, calibrationCommandSent: false });
+        result = { saved: true, profile: s.title, mode: 'auto', value: s.value, calibrationCommandSent: false };
+        return;
+      }
+      note('profile_mode_saved', { profile: s.title, profileKey: s.key, mode: body.mode, multiplier: manual });
       if (alive(token) && activeKey === s.key) await activate(token);
       code = pending || activeKey !== s.key ? 202 : 200;
       result = { saved: true, profile: s.title, mode: body.mode, waiting: code === 202 };
@@ -426,9 +476,9 @@ function createPlugin(host) {
       if (reload) {
         // Delayed pre-recovery shots must not teach Auto, even when history is otherwise empty.
         m.recoveryCutoff = cutoff;
-        if (mode === 'manual') m.overrides[manualKey(s.title)] = s.value;
+        if (mode === 'manual') { m.overrides[manualKey(s.title)] = s.value; m.manual[manualKey(s.title)] = s.value; }
         else m.programs[s.key] = { target: s.value, applied: s.value };
-      } else m.overrides[manualKey(s.title)] = s.value;
+      } else { m.overrides[manualKey(s.title)] = s.value; m.manual[manualKey(s.title)] = s.value; }
       prepared.lastRecovery = reload ? { previousIntent: prior ? prior.previousIntent : JSON.parse(JSON.stringify(originalIntent)),
         authority: 'operator_confirmed_reload_current', status: 'prepared', intent: intent, attempts: prior ? prior.attempts + 1 : 1,
         firstAt: prior ? prior.firstAt : at,
@@ -458,9 +508,11 @@ function createPlugin(host) {
   }
   function status() {
     var m = db.machines['s:' + expectedSerial], manual = m && m.overrides ? m.overrides[manualKey(activeTitle)] : undefined;
+    var remembered = m && m.manual ? m.manual[manualKey(activeTitle)] : undefined;
     return { plugin: { id: ID, version: VERSION }, enabled: enabled, ready: ready, stopped: stopped,
       canSetMode: canSetMode(), context: context(),
-      profile: activeKey ? { key: activeKey, title: activeTitle, mode: manual === undefined ? 'auto' : 'manual', manualValue: manual === undefined ? null : manual } : null,
+      profile: activeKey ? { key: activeKey, title: activeTitle, mode: manual === undefined ? 'auto' : 'manual',
+        manualValue: manual === undefined ? null : manual, rememberedManual: remembered === undefined ? null : remembered } : null,
       calibrationWritesAllowed: enabled && ready && !stopped && !held, expectedSerial: expectedSerial,
       fitMethod: 'fixed_zero_lag_v2', gain: 1, perShotCap: null, bounds: [0.35, 2], deadband: 0.01,
       queuedWriteProtection: 'best_effort_only', persistentManualOverride: true,
