@@ -34,6 +34,8 @@ function harness(options = {}) {
       await plugin.onEvent({ name: 'storageRead', payload: { key: 'calibration-v2', value: stored } });
     },
     async event(name, payload) { await plugin.onEvent({ name, payload }); },
+    async view() { return JSON.parse((await plugin.__httpRequestHandler({ endpoint: 'view', method: 'GET' })).body); },
+    async recover(body) { return await plugin.__httpRequestHandler({ endpoint: 'recover', method: 'POST', body }); },
     async store(id = 'new') { await plugin.onEvent({ name: 'shotStored', payload: { id } }); },
     async select(next) { h.workflow = { profile: structuredClone(next) }; await h.event('workflowUpdated', h.workflow); },
   };
@@ -77,6 +79,147 @@ function harness(options = {}) {
   h.plugin = plugin;
   return h;
 }
+
+async function legacyVerificationHold(options = {}) {
+  const filter = { title: 'Filter3', version: '1', steps: [{ name: 'pour', flow: 2 }] };
+  const dflow = { title: 'D-Flow / Step-down', version: '1', steps: [{ name: 'pour', pressure: 6 }] };
+  const seed = harness(); seed.current = 2; seed.workflow = { profile: structuredClone(filter) }; await seed.start();
+  const filterKey = seed.status().profile.key;
+  await seed.select(dflow); await seed.mode('manual', 1);
+  const saved = seed.stored();
+  saved.pending = { serial, key: filterKey, shotId: null, expected: 1, command: 2, kind: 'baseline' };
+  const h = harness({ ...options, saved }); h.current = 2; h.workflow = { profile: structuredClone(filter) }; await h.start();
+  return { h, filter, dflow };
+}
+
+function recoveryBody(review) {
+  return { context: review.context, profileKey: review.profileKey, value: review.value, confirmSettled: true };
+}
+
+test('late workflow events during a verified write cannot replace the authoritative active profile', async () => {
+  const h = harness(), filter = { title: 'Filter3', version: '1', steps: [{ name: 'pour', flow: 2 }] };
+  h.current = 2; h.workflow = { profile: structuredClone(filter) }; await h.start();
+  await h.select(profile); await h.mode('manual', 1); let late;
+  h.hook = (u, init) => {
+    if (!late && u.pathname.endsWith('/calibration') && init.method === 'POST' && JSON.parse(init.body).flowMultiplier === 2) {
+      late = h.event('workflowUpdated', { profile });
+    }
+  };
+  await h.select(filter); await late;
+  assert.equal(h.current, 2); assert.equal(h.status().held, null);
+  assert.equal(h.status().profile.title, 'Filter3'); assert.equal(h.status().unresolvedIntent, null);
+  assert.equal(h.status().machines['s:' + serial].expected, 2);
+  assert.deepEqual(h.posts.map(p => p.flowMultiplier), [1, 2]);
+});
+
+test('workflow events after unload do not start refreshes or resume work', async () => {
+  const h = harness(); await h.start(); h.plugin.onUnload(); const before = h.calls.length;
+  await h.event('workflowUpdated', { profile });
+  assert.equal(h.calls.length, before); assert.equal(h.status().stopped, true); assert.equal(h.posts.length, 0);
+});
+
+test('a real profile change during dispatch still holds and exposes the failed verification checks', async () => {
+  const h = harness(); await h.start(); let changed;
+  h.hook = (u, init) => {
+    if (!changed && init.method === 'POST') changed = h.select({ ...profile, title: 'Really changed' });
+  };
+  await h.store(); await changed;
+  const s = h.status(); assert.equal(s.held, 'write_verification_failed'); assert.ok(s.unresolvedIntent);
+  assert.equal(s.profile.title, 'Really changed');
+  assert.ok(s.verificationFailure.reasons.includes('profile_changed'));
+  assert.ok(s.verificationFailure.reasons.includes('controller_context_changed'));
+  assert.equal(h.posts.length, 1);
+});
+
+test('Check again reviews the current profile and a legacy intent without changing durable state', async () => {
+  const { h, dflow } = await legacyVerificationHold(); const before = h.stored(), writes = h.writes.length;
+  const model = await h.view(); assert.equal(model.profile.title, 'Filter3');
+  assert.equal(model.value, 2); assert.equal(model.canSetMode, false);
+  assert.equal(model.recovery.available, true); assert.equal(model.recovery.value, 2);
+  assert.equal(model.recovery.requiresSettledConfirmation, true);
+  assert.deepEqual(h.stored(), before); assert.equal(h.writes.length, writes); assert.equal(h.posts.length, 0);
+  await h.select(dflow); const other = await h.view(); assert.equal(other.profile.title, dflow.title);
+  assert.equal(other.recovery.available, false); assert.equal(other.recovery.reason, 'recovery_profile_mismatch');
+  assert.deepEqual(h.stored(), before);
+});
+
+test('explicit recovery keeps the checked current value in Manual, preserves other profiles and never resends', async () => {
+  const { h, dflow } = await legacyVerificationHold(); const before = h.stored();
+  const review = (await h.view()).recovery, response = await h.recover(recoveryBody(review));
+  assert.equal(response.status, 200); assert.equal(h.status().held, null); assert.equal(h.status().ready, true);
+  assert.equal(h.status().unresolvedIntent, null); assert.equal(h.status().profile.mode, 'manual');
+  assert.equal(h.status().profile.manualValue, 2); assert.equal(h.current, 2); assert.equal(h.posts.length, 0);
+  const m = h.stored().machines['s:' + serial];
+  assert.equal(m.expected, 2); assert.equal(m.baseline, 2); assert.equal(m.overrides['t:' + dflow.title], 1);
+  assert.deepEqual(m.programs, before.machines['s:' + serial].programs);
+  assert.deepEqual(m.consumed, before.machines['s:' + serial].consumed);
+  assert.equal(h.stored().lastRecovery.previousIntent.command, 2);
+  assert.equal(h.stored().lastRecovery.authority, 'operator_confirmed_manual');
+  assert.equal((await h.recover(recoveryBody(review))).status, 409);
+  const restart = harness({ saved: h.stored() }); restart.current = 2; restart.workflow = h.workflow; await restart.start();
+  assert.equal(restart.status().held, null); assert.equal(restart.status().profile.mode, 'manual'); assert.equal(restart.posts.length, 0);
+});
+
+test('recovery rejects absent confirmation, stale requests, changed machines/profiles/values and busy state', async () => {
+  for (const mutate of [
+    (h, b) => { b.confirmSettled = false; }, (h, b) => { b.context = 'stale'; },
+    h => { h.machine.serialNumber = 'different'; }, h => { h.machine.model = 'Bengle'; },
+    h => { h.state = 'espresso'; }, h => { h.workflow = { profile }; }, h => { h.current = 1; },
+  ]) {
+    const { h } = await legacyVerificationHold(), before = h.stored(), body = recoveryBody((await h.view()).recovery);
+    mutate(h, body); const response = await h.recover(body);
+    assert.ok(response.status >= 400); assert.ok(h.status().held); assert.ok(h.status().unresolvedIntent);
+    assert.equal(h.posts.length, 0); assert.deepEqual(h.stored(), before);
+  }
+});
+
+test('recovery storage failures retain the hold and intent; profile changes during preparation cannot resume', async () => {
+  for (const offset of [1, 2]) {
+    const { h } = await legacyVerificationHold(), body = recoveryBody((await h.view()).recovery);
+    h.failStorageAt = h.storageAttempts + offset;
+    assert.ok((await h.recover(body)).status >= 400); assert.ok(h.status().held); assert.ok(h.status().unresolvedIntent);
+    assert.ok(h.stored().pending); assert.equal(h.posts.length, 0);
+  }
+  const { h } = await legacyVerificationHold(), before = h.stored(), body = recoveryBody((await h.view()).recovery);
+  h.hook = u => { if (u.pathname.endsWith('/shots')) h.workflow = { profile }; };
+  assert.equal((await h.recover(body)).status, 409); assert.ok(h.status().unresolvedIntent);
+  assert.deepEqual(h.stored(), before); assert.equal(h.posts.length, 0);
+});
+
+test('recovery cannot bypass a pending model binding, missing acknowledgement, or a late context change', async () => {
+  const modelCase = await legacyVerificationHold();
+  const saved = modelCase.h.stored(); saved.pending.model = 'DE1Pro';
+  const changedModel = harness({ saved }); changedModel.current = 2; changedModel.machine.model = 'DE1Plus';
+  changedModel.workflow = { profile: modelCase.filter }; await changedModel.start();
+  assert.equal((await changedModel.view()).recovery.available, false); assert.equal(changedModel.posts.length, 0);
+
+  const { h: noAck } = await legacyVerificationHold({ ack: false });
+  const noAckBody = recoveryBody((await noAck.view()).recovery);
+  assert.ok((await noAck.recover(noAckBody)).status >= 400);
+  assert.equal(noAck.status().held, 'storage_ack_timeout'); assert.ok(noAck.stored().pending); assert.equal(noAck.posts.length, 0);
+
+  const { h } = await legacyVerificationHold(); const body = recoveryBody((await h.view()).recovery);
+  let reads = 0;
+  h.hook = u => { if (u.pathname.endsWith('/workflow') && ++reads === 4) h.workflow = { profile }; };
+  assert.equal((await h.recover(body)).status, 409); assert.ok(h.status().held); assert.ok(h.stored().pending);
+  assert.equal(h.posts.length, 0);
+});
+
+test('verification diagnostics distinguish a value mismatch and a newly busy machine', async () => {
+  const value = harness(); await value.start(); value.wrongReadback = true; await value.store();
+  assert.deepEqual(value.status().verificationFailure.reasons, ['value_mismatch']);
+  assert.equal(value.status().verificationFailure.observed.value, 1.13);
+  const busy = harness(); await busy.start(); busy.hook = (u, init) => { if (init.method === 'POST') busy.state = 'espresso'; };
+  await busy.store(); assert.deepEqual(busy.status().verificationFailure.reasons, ['machine_busy']);
+  assert.equal(busy.status().verificationFailure.observed.state, 'espresso');
+});
+
+test('recovery never accepts an unreviewed request or a read-only request as confirmation', async () => {
+  const { h } = await legacyVerificationHold(); const before = h.stored();
+  assert.equal((await h.recover({ context: h.status().context, profileKey: h.status().profile?.key, value: 2, confirmSettled: true })).status, 409);
+  assert.equal(h.plugin.__httpRequestHandler({ endpoint: 'recover', method: 'GET' }).status, 405);
+  assert.deepEqual(h.stored(), before); assert.equal(h.posts.length, 0);
+});
 
 test('the original plugin upgrade is serial-pinned, disabled by default, and read-only status has no effects', async () => {
   assert.equal(payload.manifest.settings.Enabled.default, false);
@@ -288,8 +431,8 @@ test('same serial with a changed live model cannot receive a calibration command
 test('per-shot dose/grind metadata does not create another extraction program or another write token', async () => {
   const h = harness(); await h.start(); await h.store();
   h.workflow.context = { targetDoseWeight: 15, grinderSetting: 'new grind' };
-  const before = h.calls.length; await h.event('workflowUpdated', h.workflow);
-  assert.equal(h.calls.length, before); assert.equal(h.posts.length, 1);
+  const before = h.storageAttempts, context = h.status().context; await h.event('workflowUpdated', h.workflow);
+  assert.equal(h.storageAttempts, before); assert.equal(h.status().context, context); assert.equal(h.posts.length, 1);
 });
 
 test('tile/page reads do not evaluate, write storage or touch calibration; fresh view remains observational', async () => {

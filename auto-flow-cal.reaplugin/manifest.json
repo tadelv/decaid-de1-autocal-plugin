@@ -3,7 +3,7 @@
   "name": "Auto Flow Calibration",
   "author": "Decent",
   "description": "Helps the machine’s flow estimate match your scale, with automatic calibration or a manual value for each profile. Supervise calibration changes.",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "apiVersion": 1,
   "permissions": ["log", "api", "emit", "pluginStorage", "events.workflow", "events.shots", "events.machine"],
   "settings": {
@@ -16,6 +16,7 @@
     { "id": "ui", "type": "http", "data": {} },
     { "id": "view", "type": "http", "data": {} },
     { "id": "mode", "type": "http", "data": {} },
+    { "id": "recover", "type": "http", "data": {} },
     { "id": "changed", "type": "websocket", "data": {} }
   ]
 }

@@ -1,4 +1,4 @@
-# Auto Flow Calibration UI — 2.0.0
+# Auto Flow Calibration UI — 2.0.1
 
 The Brew multiplier and Manual/Auto controls now belong to the **original `auto-flow-cal.reaplugin`**. The temporary `-updater` identity is retired as a product and has been removed from p85pro after the original-ID build was verified ready. The operator-approved install retained actual **0.835** calibration, checked the real read-only UI routes and left the old original state untouched. Version 2 consolidates the tested 0.4.0 behavior; it does not introduce a different estimator.
 
@@ -30,7 +30,17 @@ Captured during the 2026-11-26 fixture validation. Overlay screenshots are cropp
 - Use manual accepts 0.350–2.000 at three-decimal resolution. Auto restores the current recipe's verified automatic value or starting baseline, then uses only subsequent usable shots.
 - Controls require master enable, an exact serial pin, a ready controller, fresh identity/context, between-shot state and successful persistence. Stale drafts or ambiguous requests require Check again; no silent retry.
 
-The HTTP endpoints are `status`, `skin`, `ui`, `view` and `mode`. The `changed` WebSocket invalidates only the skin. The original manifest declares these endpoints and `emit`/`events.machine`; endpoint declarations are not optional under Decaid's routing rules. Read-only endpoints reject mutation attempts; only explicit POST `mode` changes a selection.
+The HTTP endpoints are `status`, `skin`, `ui`, `view`, `mode` and `recover`. The `changed` WebSocket invalidates only the skin. The original manifest declares these endpoints and `emit`/`events.machine`; endpoint declarations are not optional under Decaid's routing rules. Read-only endpoints reject mutation attempts. Explicit POST `mode` changes a selection; POST `recover` adopts a reviewed matching value as a new Manual choice without sending it to the machine.
+
+## Reviewing a paused change in 2.0.1
+
+**Check again** now reviews the current workflow, target, state and saved intent while calibration is paused. It never clears the hold or resends a calibration command by itself. The profile shown follows Decaid's current workflow, even while held.
+
+If the supported pinned machine is idle and both profile and value match the paused change, a recovery panel appears. Independently check that the previous operation has finished, tick the confirmation and choose **Keep ×… in Manual**. This creates an explicit Manual choice using the value already read on the machine, preserves other profiles and records the old intent for audit. No calibration POST is issued. Return to Auto later only as an explicit choice.
+
+If the machine/profile/value is different, the machine is busy, or the old operation may still be pending, leave it paused. Do not delete saved state or blindly retry. Changing profile, connection, value or context invalidates the review; a failed response is not automatically retried. **More details → Verification checks** shows the checks that failed when available. Old 2.0.0 intents can be reviewed even without those newer diagnostics.
+
+The historical previews above do not show this new panel. [Full recovery procedure and limitations](RELEASE-2.0.1.md).
 
 ## Profile matching
 

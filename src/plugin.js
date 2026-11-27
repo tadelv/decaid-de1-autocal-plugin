@@ -6,13 +6,14 @@ function createPlugin(host) {
   var enabled = false, expectedSerial = '', boundModel = null, stopped = true, ready = false, hydrated = false, held = null;
   var generation = 0, activeKey = null, activeTitle = null, pending = null, waiting = null, retryQueued = false, lastRetry = 0, controlBusy = false;
   var chain = Promise.resolve(), decisions = [], db = empty();
+  var workflowCheck = null, workflowRevision = 0, recovering = false, recovery = null;
   var session = Date.now().toString(36) + '-' + Math.random().toString(36), revision = 0;
   var ui = createFlowCalibrationUI(host, get, status, function () { return expectedSerial; }, models);
 
   // Fresh versioned storage leaves the legacy 1.x state untouched; no migration is attempted.
   function empty() { return { version: 2, machines: {}, pending: null }; }
   function context() { return session + ':' + generation + ':' + revision; }
-  function canSetMode() { return alive(generation) && !!activeTitle && !!activeTitle.trim() && !waiting && !db.pending && !controlBusy; }
+  function canSetMode() { return alive(generation) && !!activeTitle && !!activeTitle.trim() && !waiting && !db.pending && !controlBusy && !workflowCheck; }
   // Manual is a choice for the named profile; editing its recipe must not silently turn Auto back on.
   function manualKey(title) { return 't:' + title; }
   function range(n) { return typeof n === 'number' && isFinite(n) && n >= 0.35 && n <= 2; }
@@ -45,19 +46,26 @@ function createPlugin(host) {
     if (response.ok === false || response.status >= 400) throw new Error('read_failed:' + path.split('?')[0]);
     return await response.json();
   }
-  function save() {
+  function save(value) {
     if (stopped) return Promise.reject(new Error('unloaded'));
-    db.writeToken = session + ':' + (++revision);
+    var data = value || db;
+    data.writeToken = session + ':' + (++revision);
     // storage() returns void. Only the host's matching storageWrite event proves acknowledgement.
     return new Promise(function (resolve, reject) {
-      var token = db.writeToken;
+      var token = data.writeToken;
       var timer = setTimeout(function () {
         if (waiting && waiting.token === token) { waiting = null; reject(new Error('storage_ack_timeout')); }
       }, 10000);
       waiting = { token: token, resolve: resolve, reject: reject, timer: timer };
-      try { host.storage({ type: 'write', key: STORAGE_KEY, namespace: ID, data: JSON.parse(JSON.stringify(db)) }); }
+      try { host.storage({ type: 'write', key: STORAGE_KEY, namespace: ID, data: JSON.parse(JSON.stringify(data)) }); }
       catch (error) { clearTimeout(timer); waiting = null; reject(new Error('storage_write_failed')); }
     });
+  }
+  function validIntent(value) {
+    return value && typeof value === 'object' && typeof value.serial === 'string' && value.serial !== '' && value.serial !== '0' &&
+      typeof value.key === 'string' && value.key.indexOf('p:') === 0 && grid(value.expected) && grid(value.command) &&
+      ['learning', 'manual', 'baseline', 'recall'].indexOf(value.kind) >= 0 &&
+      (value.model === undefined || models.indexOf(value.model) >= 0);
   }
   function validate(value) {
     if (!value || [1, 2].indexOf(value.version) < 0 || !value.machines || typeof value.machines !== 'object' || Array.isArray(value.machines) ||
@@ -75,6 +83,7 @@ function createPlugin(host) {
       if (!m.overrides || typeof m.overrides !== 'object' || Array.isArray(m.overrides) ||
           Object.keys(m.overrides).some(function (p) { return p.indexOf('t:') !== 0 || !p.slice(2).trim() || !grid(m.overrides[p]); })) throw new Error('invalid_saved_state');
     });
+    if (value.pending !== null && (!validIntent(value.pending) || !value.machines['s:' + value.pending.serial])) throw new Error('invalid_saved_state');
     value.version = 2;
     return value;
   }
@@ -89,9 +98,37 @@ function createPlugin(host) {
     if (!grid(calibration.flowMultiplier)) throw new Error('unsupported_live_multiplier');
     ui.observe(info, calibration.flowMultiplier);
     return { serial: String(info.serialNumber), model: info.model, key: key(workflow.profile), title: workflow.profile.title,
+      state: machineState.state && machineState.state.state,
       safe: safe(machineState.state), value: Math.round(calibration.flowMultiplier * 1000) / 1000 };
   }
   function record(s) { return db.machines['s:' + s.serial]; }
+  function syncProfile(s) {
+    if (s.key === activeKey) return false;
+    generation++; activeKey = s.key; activeTitle = s.title; pending = null; recovery = null;
+    ui.changed('profile_changed'); return true;
+  }
+  async function settleWorkflow() {
+    while (workflowCheck) { var current = workflowCheck; await current; if (workflowCheck === current) break; }
+  }
+  function workflowUpdated() {
+    // Events invalidate cached knowledge; only the current REST workflow selects the profile.
+    var rev = ++workflowRevision, authorize = ready && !held && !recovering;
+    var check = (async function () {
+      var w = await get('/workflow');
+      if (stopped || rev !== workflowRevision) return null;
+      return { changed: syncProfile({ key: key(w.profile), title: w.profile.title }), token: generation };
+    })().catch(function (error) { if (!stopped && rev === workflowRevision) hold(String(error.message || error)); return null; });
+    workflowCheck = check;
+    check.then(function () { if (workflowCheck === check) { workflowCheck = null; ui.changed(); } });
+    return check.then(function (result) {
+      if (!result || !authorize || !alive(result.token)) return;
+      if (result.changed) return serialized(function () { return activate(result.token); });
+      if (pending && !retryQueued && Date.now() - lastRetry >= 500) {
+        retryQueued = true; lastRetry = Date.now();
+        return serialized(apply).finally(function () { retryQueued = false; });
+      }
+    });
+  }
   async function arm() {
     if (!enabled || stopped || held) return;
     if (!expectedSerial || expectedSerial === '0') throw new Error('expected_serial_required');
@@ -140,9 +177,10 @@ function createPlugin(host) {
     }
     var command = Math.round(p.target * 1000) / 1000;
     if (!grid(command)) throw new Error('invalid_command');
-    db.pending = { serial: p.serial, key: p.key, shotId: p.shotId, expected: s.value, command: command, kind: p.kind };
+    db.pending = { serial: p.serial, model: s.model, key: p.key, shotId: p.shotId, expected: s.value, command: command, kind: p.kind };
     await save();
     // Best effort only: no host-side execution-time compare-and-set exists yet.
+    await settleWorkflow();
     var final = await snapshot();
     if (!await check(final, p.token, p) || !final.safe) {
       db.pending = null; await save();
@@ -155,8 +193,19 @@ function createPlugin(host) {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ flowMultiplier: command })
     });
     if (response.ok === false || response.status >= 400) throw new Error('write_outcome_unresolved');
-    var verified = await snapshot();
-    if (!alive(p.token) || verified.key !== p.key || verified.serial !== p.serial || verified.value !== command || !verified.safe) throw new Error('write_verification_failed');
+    await settleWorkflow();
+    var verified = await snapshot(), reasons = [];
+    if (!alive(p.token)) reasons.push('controller_context_changed');
+    if (verified.key !== p.key) reasons.push('profile_changed');
+    if (verified.serial !== p.serial) reasons.push('machine_changed');
+    if (verified.value !== command) reasons.push('value_mismatch');
+    if (!verified.safe) reasons.push('machine_busy');
+    if (reasons.length) {
+      db.pending.verification = { reasons: reasons, expected: { profileKey: p.key, value: command, serial: p.serial },
+        observed: { profileKey: verified.key, profileTitle: verified.title, value: verified.value, serial: verified.serial, state: verified.state } };
+      await save();
+      throw new Error('write_verification_failed');
+    }
     var m = record(verified);
     m.expected = command;
     if (p.kind === 'learning' || p.kind === 'recall') {
@@ -245,6 +294,72 @@ function createPlugin(host) {
     }).then(function () { return json(request, held ? 503 : code, held ? { error: held, uncertain: true } : result); })
       .finally(function () { controlBusy = false; ui.changed(); });
   }
+  async function reviewRecovery(request) {
+    recovery = null;
+    if (enabled && !stopped && hydrated && held && db.pending) {
+      try {
+        await settleWorkflow();
+        var s = await snapshot(); syncProfile(s);
+        var intent = db.pending, reason = !validIntent(intent) ? 'invalid_saved_state'
+          : recovering || controlBusy || waiting ? 'recovery_busy'
+          : intent.serial !== s.serial || (intent.model && intent.model !== s.model) ? 'wrong_machine'
+          : !s.safe ? 'machine_busy'
+          : intent.key !== s.key ? 'recovery_profile_mismatch'
+          : intent.command !== s.value ? 'recovery_value_mismatch' : null;
+        recovery = { available: !reason, reason: reason, context: context(), profileKey: s.key, profileTitle: s.title,
+          serial: s.serial, model: s.model, value: s.value, command: intent.command, requiresSettledConfirmation: true };
+      } catch (error) {
+        var code = String(error.message || error); ui.changed(code);
+        recovery = { available: false, reason: code };
+      }
+    }
+    return json(request, 200, ui.model());
+  }
+  function recoverRequest(request) {
+    if (request.method !== 'POST') return json(request, 405, { error: 'post_required' });
+    var body;
+    try { body = typeof request.body === 'string' ? JSON.parse(request.body) : request.body; } catch (error) { return json(request, 400, { error: 'invalid_request' }); }
+    if (!body || body.confirmSettled !== true || !grid(body.value)) return json(request, 400, { error: 'explicit_recovery_confirmation_required' });
+    if (!enabled || stopped || !hydrated || !held || !validIntent(db.pending) || !recovery || !recovery.available ||
+        controlBusy || recovering || waiting || workflowCheck) return json(request, 409, { error: 'recovery_unavailable' });
+    if (body.context !== context() || body.context !== recovery.context || body.profileKey !== recovery.profileKey || body.value !== recovery.value) return json(request, 409, { error: 'stale_context' });
+    controlBusy = true; recovering = true;
+    var code = 200, result = { saved: false };
+    return serialized(async function () {
+      var originalIntent = db.pending, token = generation;
+      function matches(s) {
+        return !stopped && enabled && generation === token && s.safe && s.serial === originalIntent.serial &&
+          (!originalIntent.model || s.model === originalIntent.model) && s.key === body.profileKey && s.key === originalIntent.key &&
+          s.value === body.value && s.value === originalIntent.command;
+      }
+      await settleWorkflow();
+      var s = await snapshot();
+      if (body.context !== context() || !matches(s)) { code = 409; result = { error: 'recovery_context_changed' }; return; }
+      var prepared = JSON.parse(JSON.stringify(db)), m = prepared.machines['s:' + s.serial];
+      await fenceHistory(m);
+      var final = await snapshot();
+      if (!matches(final)) { code = 409; result = { error: 'recovery_context_changed' }; return; }
+      // The operator creates NEW manual authority; do not claim the ambiguous old write verified.
+      m.expected = s.value; m.overrides[manualKey(s.title)] = s.value;
+      prepared.lastRecovery = { previousIntent: JSON.parse(JSON.stringify(originalIntent)), authority: 'operator_confirmed_manual',
+        serial: s.serial, profileKey: s.key, value: s.value, confirmedSettled: true, at: new Date().toISOString() };
+      // Keep the old intent durable until preparation and another context check acknowledge safely.
+      await save(prepared); db = prepared;
+      final = await snapshot();
+      if (!matches(final)) { code = 409; result = { error: 'recovery_context_changed' }; return; }
+      var completed = JSON.parse(JSON.stringify(prepared)); completed.pending = null;
+      await save(completed);
+      if (!matches(await snapshot())) {
+        await save(prepared); db = prepared;
+        code = 409; result = { error: 'recovery_context_changed' }; return;
+      }
+      db = completed; pending = null; recovery = null; activeKey = s.key; activeTitle = s.title;
+      ready = true; held = null; generation++;
+      note('recovered_manual', { profile: s.title, value: s.value, calibrationCommandSent: false });
+      result = { saved: true, profile: s.title, mode: 'manual', value: s.value, calibrationCommandSent: false };
+    }).then(function () { return json(request, code === 200 && held ? 503 : code, code === 200 && held ? { error: held, uncertain: true } : result); })
+      .finally(function () { controlBusy = false; recovering = false; ui.changed(); });
+  }
   function status() {
     var m = db.machines['s:' + expectedSerial], manual = m && m.overrides ? m.overrides[manualKey(activeTitle)] : undefined;
     return { plugin: { id: ID, version: VERSION }, enabled: enabled, ready: ready, stopped: stopped,
@@ -253,7 +368,8 @@ function createPlugin(host) {
       calibrationWritesAllowed: enabled && ready && !stopped && !held, expectedSerial: expectedSerial,
       fitMethod: 'fixed_zero_lag_v2', gain: 1, perShotCap: null, bounds: [0.35, 2], deadband: 0.01,
       queuedWriteProtection: 'best_effort_only', persistentManualOverride: true,
-      held: held, pending: pending, unresolvedIntent: db.pending, machines: db.machines, decisions: decisions };
+      held: held, pending: pending, unresolvedIntent: db.pending, recovery: recovery,
+      verificationFailure: db.pending && db.pending.verification || null, machines: db.machines, decisions: decisions };
   }
   function stop() {
     ui.stop();
@@ -285,28 +401,21 @@ function createPlugin(host) {
         });
       }
       if (event.name === 'shutdown') { stop(); return; }
+      if (event.name === 'workflowUpdated' && enabled && hydrated && !stopped) return workflowUpdated();
       if (!enabled || !ready || held) return;
-      if (event.name === 'workflowUpdated') {
-        var next;
-        try { next = key(event.payload && event.payload.profile); } catch (error) { generation++; hold('invalid_program'); return; }
-        if (next !== activeKey) {
-          generation++; activeKey = next; activeTitle = event.payload.profile.title; pending = null;
-          ui.changed('profile_changed');
-          var token = generation;
-          return serialized(function () { return activate(token); });
-        }
-      }
       if (event.name === 'shotStored' && event.payload && event.payload.id != null) {
         var id = String(event.payload.id), epoch = generation;
         return serialized(function () { return inspect(id, epoch); });
       }
-      if ((event.name === 'stateUpdate' || event.name === 'workflowUpdated') && pending && !retryQueued && Date.now() - lastRetry >= 500) {
+      if (event.name === 'stateUpdate' && pending && !retryQueued && Date.now() - lastRetry >= 500) {
         retryQueued = true; lastRetry = Date.now();
         return serialized(apply).finally(function () { retryQueued = false; });
       }
     },
     __httpRequestHandler: function (request) {
       if (request.endpoint === 'mode') return modeRequest(request);
+      if (request.endpoint === 'recover') return recoverRequest(request);
+      if (request.endpoint === 'view' && (!request.method || request.method === 'GET') && held && db.pending) return reviewRecovery(request);
       var display = ui.handle(request);
       if (display) return display;
       return { requestId: request.requestId, status: request.endpoint === 'status' ? 200 : 404,

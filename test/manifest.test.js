@@ -48,7 +48,7 @@ test('the manifest declares the endpoints it serves', () => {
   // Decaid only routes GET /api/v1/plugins/{id}/{endpoint} for endpoints the
   // manifest declares, so an undeclared handler is dead code.
   const http = manifest.api.filter(entry => entry.type === 'http');
-  assert.deepEqual(http.map(entry => entry.id), ['status', 'skin', 'ui', 'view', 'mode']);
+  assert.deepEqual(http.map(entry => entry.id), ['status', 'skin', 'ui', 'view', 'mode', 'recover']);
   assert.deepEqual(manifest.api.filter(entry => entry.type === 'websocket').map(entry => entry.id), ['changed']);
   for (const entry of manifest.api) {
     assert.equal(typeof entry.id, 'string');
