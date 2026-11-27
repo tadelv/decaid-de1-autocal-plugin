@@ -1,6 +1,6 @@
 # Auto Flow Calibration — Decaid plugin
 
-**2.0.1 upgrades the existing plugin, not a new plugin.** Its ID remains **`auto-flow-cal.reaplugin`**, so Decaid can update the original installation. This [hotfix](docs/RELEASE-2.0.1.md) corrects delayed profile-event handling and adds explicit recovery for matching paused changes. Calibration still requires supervised use.
+**2.0.2 upgrades the existing plugin, not a new plugin.** Its ID remains **`auto-flow-cal.reaplugin`**, so Decaid can update the original installation. This [recovery release](docs/RELEASE-2.0.2.md) lets **Check again** keep the paused change's current value in the profile's **own** Auto or Manual mode, without sending a calibration command. It builds on the 2.0.1 delayed-profile-event fix. Calibration still requires supervised use.
 
 It brings the displayed scale weight-flow and machine water-flow lines closer by adjusting the machine's estimation multiplier between shots. Calibration can affect flow-controlled extraction, not only the chart. Keep testing supervised.
 
@@ -9,7 +9,7 @@ It brings the displayed scale weight-flow and machine water-flow lines closer by
 - One usable new shot can supply an absolute multiplier from its final recorded extraction step. The two-shot agreement and simultaneous-flat-pressure/flow requirements are gone; usable changed-dose/grind and short-shot evidence can count.
 - Full update gain, no per-shot movement cap. Overall bounds remain **0.350–2.000**, resolution **0.001** and automatic-learning deadband **0.010**. Zero-lag fitting determines the primary result; lag diagnostics cannot veto otherwise usable zero-lag evidence.
 - The multiplier appears under **Brew**. Tap it for the light/dark overlay and per-profile **Manual/Auto** controls; Settings → Extensions also has an Open action.
-- The original manifest now declares the display/push and machine-state capabilities: `emit`, `events.machine`, HTTP `status/skin/ui/view/mode`, and the `changed` WebSocket.
+- The original manifest now declares the display/push and machine-state capabilities: `emit`, `events.machine`, HTTP `status/skin/ui/view/mode/recover`, and the `changed` WebSocket.
 
 ## Manual and Auto
 
@@ -17,9 +17,18 @@ It brings the displayed scale weight-flow and machine water-flow lines closer by
 
 Manual choices currently use the exact profile title per DE1. Same-named profiles share a choice; renaming requires choosing again. Automatic estimates use the exact title/version/steps. [Issue #1](https://github.com/tadelv/decaid-de1-autocal-plugin/issues/1) tracks stronger profile matching.
 
+## Recovering a paused change (2.0.2)
+
+When a change is paused, **Check again** reviews the current machine, profile, state and saved request. The panel shows the profile's mode, the multiplier that was requested and the value the machine reports now; they may differ. After independently confirming the previous change has finished, the operator can keep the current value as it is:
+
+- **An Auto profile stays Auto.** The checked value becomes that profile's new starting point and expected machine value. Recovery itself sends **no calibration command**, does not recall the old requested value and does not mark the old attempt as verified. Only a genuinely new shot after recovery can teach Auto again; a delayed pre-recovery shot is excluded.
+- **A Manual profile stays Manual.** Its saved manual value is replaced with the checked value, and its automatic record is kept for a later explicit Auto.
+
+Other profiles, machine values and histories are preserved; the ledger is not reset. The confirmation is supervised policy, not proof that the host queue is empty: a matching number cannot prove an earlier queued command finished, and clearing the paused record cannot cancel a command already sent.
+
 ## Installation and settings
 
-[Decaid installation instructions](https://decentespresso.com/docs/how_to_install_skins_or_plugins_on_decaid). Use the release's **`auto-flow-cal-v2.0.1.zip`**, or the checked-in `auto-flow-cal.reaplugin/` directory. It contains the complete built plugin; copying `src/plugin.js` alone does not work. The normal public GitHub installation route uses the latest published release.
+[Decaid installation instructions](https://decentespresso.com/docs/how_to_install_skins_or_plugins_on_decaid). Use the release's **`auto-flow-cal-v2.0.2.zip`**, or the checked-in `auto-flow-cal.reaplugin/` directory. It contains the complete built plugin; copying `src/plugin.js` alone does not work. The normal public GitHub installation route uses the latest published release.
 
 | Setting | Fresh default | Meaning |
 |---|---|---|
@@ -49,7 +58,7 @@ GET /api/v1/plugins/auto-flow-cal.reaplugin/ui
 GET /api/v1/plugins/auto-flow-cal.reaplugin/view
 ```
 
-`status` reads memory only. `view` independently reads the selected machine; while an intent is held, it also reviews current workflow/state for recovery. `skin` and `ui` render cached data and declarations. These GETs never clear an intent or send calibration commands. Explicit POST `mode` selects Manual/Auto; POST `recover` requires an operator-confirmed review and keeps a matching checked value in Manual without resending it. Both preserve target, context, idle and persistence guards.
+`status` reads memory only. `view` independently reads the selected machine; while an intent is held, it also reviews current workflow/state for recovery. `skin` and `ui` render cached data and declarations. These GETs never clear an intent or send calibration commands. Explicit POST `mode` selects Manual/Auto; POST `recover` requires an operator-confirmed review and keeps the checked value in the profile's own mode without resending it. A differing read-back needs the explicit `action: 'reload_current'` discriminator; an older matching-only request without it keeps the 2.0.1 Manual behavior and fails clearly on a mismatch. Both preserve target, context, idle and persistence guards.
 
 ## Development
 
@@ -65,6 +74,6 @@ npm run fit:offline -- --v2          # current zero-lag fitter, offline sanitize
 
 Current controller and UI tests run against the real compiled bundle. Frozen 1.4 code lives under `test/legacy/` only, with explicitly named legacy tests and `tools/legacy-why-skip.js` for historical diagnostics; it is not bundled. Sanitized real-shot fixtures contain no machine identity or personal shot metadata. The separate historical [observer](observer/README.md) remains research tooling, not a second calibration writer.
 
-Release tags must match the manifest (`v2.0.1`). The workflow prepares **drafts only**; publication requires operator approval. [Hotfix notes, recovery steps and validation limits](docs/RELEASE-2.0.1.md). [Recorded supervised-trial evidence](docs/trial-results.md).
+Release tags must match the manifest (`v2.0.2`). The workflow prepares **drafts only**; publication requires operator approval. [Recovery release notes and validation limits](docs/RELEASE-2.0.2.md); the earlier [2.0.1 hotfix notes](docs/RELEASE-2.0.1.md) remain historical. [Recorded supervised-trial evidence](docs/trial-results.md).
 
 The earlier Design and Implementation Plan describe 1.x and remain historical references. The current behavior and limitations are documented here, in the UI notes and regression tests.

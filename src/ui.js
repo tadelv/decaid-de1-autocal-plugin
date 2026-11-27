@@ -3,6 +3,7 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
   var cache = { value: null, readAt: null, error: null }, revision = 0, closed = false, inflight = null, pushed = null;
   var open = { type: 'open', view: 'calibration', presentation: 'overlay', fit: true, closeOnShot: true };
   function number(n) { return typeof n === 'number' && isFinite(n) && n > 0; }
+  function fixed(n) { return typeof n === 'number' && isFinite(n) ? '×' + n.toFixed(3) : '—'; }
   function matches(info) {
     return info && models.indexOf(info.model) >= 0 && pin() && String(info.serialNumber) === pin();
   }
@@ -26,6 +27,7 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
   function resultMessage(reason) {
     var messages = {
       recovered_manual: 'The checked value was kept in Manual. No new calibration change was sent.',
+      recovered_auto: 'The checked value was kept in Automatic as the new starting value. No new calibration change was sent.',
       armed_for_new_shots: 'Ready for your next shot.', applied_verified: 'The new value was checked on the machine.',
       no_write_needed: 'The value is close enough; no change was needed.', new_target: 'A new value was estimated from the last shot.',
       no_fit: 'Not enough usable shot data to suggest a new value.', manual_shot_ignored: 'Manual mode kept your chosen value.',
@@ -43,9 +45,11 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
   }
   function recoveryMessage(r) {
     if (!r) return '';
-    if (r.available) return 'The paused change matches the value now on the selected machine. Confirm only after checking that the previous change has finished. This keeps the value in Manual; it does not resend a calibration command.';
+    if (r.available) return 'Paused request ' + fixed(r.command) + '; the machine now reads ' + fixed(r.value) + '. ' +
+      (r.mode === 'manual' ? 'This keeps the profile in Manual and saves the current value as its manual value.'
+        : 'This keeps the profile in Automatic and uses the current value as its new starting value.') +
+      ' Confirm only after checking that the previous change has finished; no calibration command is sent.';
     var messages = { recovery_profile_mismatch: 'Select the profile of the paused change, then tap Check again.',
-      recovery_value_mismatch: 'The current value does not match the paused change. Leave calibration paused and contact support.',
       machine_busy: 'Wait until the machine is idle, then tap Check again.', recovery_busy: 'Wait for the current operation to finish, then tap Check again.',
       wrong_machine: 'Connect the selected DE1 before reviewing recovery.' };
     return typeof messages[r.reason] === 'string' ? messages[r.reason] : 'Recovery is not available. Check the machine connection and support code; do not reset saved state.';
@@ -166,9 +170,9 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
         '<div class="value" id="value">—</div><p class="muted" id="read-time">Checking your machine…</p><p id="mode" role="status" aria-live="polite"></p>' +
         '<form id="override-form"><label for="manual-value">Manual value (0.350–2.000)</label><div class="controls"><button type="button" id="use-auto">Auto</button><input id="manual-value" type="text" inputmode="decimal" autocomplete="off" maxlength="8" aria-label="Manual value, 0.350 to 2.000"><button type="submit" id="set-manual">Use manual</button></div></form>' +
         '<p class="muted" id="control-help">Auto restores the saved automatic or starting value, then uses new shots.</p><p class="muted" id="action-message" role="status" aria-live="polite"></p>' +
-        '<section id="recovery-panel" hidden aria-labelledby="recovery-heading"><h2 id="recovery-heading">Review the paused change</h2><p id="recovery-summary"></p><label><input id="recovery-confirm" type="checkbox"> I checked this machine and value, and the previous change has finished.</label><button type="button" id="recover" disabled>Keep current value in Manual</button></section>' +
+        '<section id="recovery-panel" hidden aria-labelledby="recovery-heading"><h2 id="recovery-heading">Review the paused change</h2><p id="recovery-summary"></p><p id="recovery-values"></p><label><input id="recovery-confirm" type="checkbox"> I checked this machine and value, and the previous change has finished.</label><button type="button" id="recover" disabled>Keep current value</button></section>' +
         '<details id="fit-details"><summary>More details</summary><dl><div><dt>Verification checks</dt><dd id="verification">—</dd></div><div><dt>Last suggested value</dt><dd id="target">—</dd></div><div><dt>Last value set</dt><dd id="applied">—</dd></div><div><dt>Shot data used</dt><dd id="coverage">—</dd></div><div><dt>Shot</dt><dd id="shot">—</dd></div><div><dt>Data notes</dt><dd id="warnings">—</dd></div><div><dt>Last update</dt><dd id="result">—</dd></div><div><dt>Support code</dt><dd id="support-code">—</dd></div></dl>' +
-        '<footer class="muted">This changes the machine’s flow estimate, not the profile’s flow target. Trial version: wait for a change to finish before starting another shot. A change already sent to the machine cannot be cancelled. Manual values follow profile names, even after recipe edits. Profiles with the same name share a value; renamed profiles need a new choice.</footer></details>' +
+        '<footer class="muted">This changes the machine’s flow estimate, not the profile’s flow target. Trial version: wait for a change to finish before starting another shot. A change already sent to the machine cannot be cancelled; Check again can keep a paused change’s current value in that profile’s own Auto or Manual mode without sending a calibration command. Manual values follow profile names, even after recipe edits. Profiles with the same name share a value; renamed profiles need a new choice.</footer></details>' +
         '<p class="muted" id="message"></p>' +
         '<nav><button type="button" id="refresh">Check again</button><button type="button" id="close">Close</button></nav></section>' +
         '<script>(' + pageClient.toString() + ')(' + scriptJson(model()) + ',' + scriptJson(returnTo) + ');</script></body></html>' };
@@ -189,7 +193,9 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
     }
     function paint(m) {
       var previous = latest && latest.recovery, next = m.recovery;
-      if (!previous || !next || previous.context !== next.context || previous.profileKey !== next.profileKey || previous.value !== next.value || !next.available) {
+      // Consent belongs to one exact reviewed request: context, profile, mode, value, paused command and pending intent.
+      if (!previous || !next || previous.context !== next.context || previous.profileKey !== next.profileKey || previous.value !== next.value ||
+          previous.mode !== next.mode || previous.command !== next.command || previous.intent !== next.intent || !next.available) {
         recoveryConsent = null; document.getElementById('recovery-confirm').checked = false;
       }
       latest = m;
@@ -197,7 +203,11 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
       document.getElementById('recovery-confirm').disabled = !next || !next.available || changing;
       text('recovery-summary', next ? (next.model || '') + (next.serial ? ' · ' + next.serial : '') +
         (next.profileTitle ? ' · ' + next.profileTitle : '') + ' — ' + (m.recoveryText || 'Review the paused change before continuing.') : '');
-      text('recover', next && typeof next.value === 'number' ? 'Keep ×' + next.value.toFixed(3) + ' in Manual' : 'Keep current value in Manual');
+      text('recovery-values', next && typeof next.mode === 'string'
+        ? 'Mode: ' + (next.mode === 'manual' ? 'Manual' : 'Automatic') + ' · paused request ' + multiplier(next.command) +
+          ' · current machine value ' + multiplier(next.value) : '');
+      text('recover', next && typeof next.value === 'number' && typeof next.mode === 'string'
+        ? 'Keep ' + multiplier(next.value) + ' in ' + (next.mode === 'manual' ? 'Manual' : 'Automatic') : 'Keep current value');
       text('verification', m.verificationFailure && Array.isArray(m.verificationFailure.reasons) ? m.verificationFailure.reasons.join(', ') : '—');
       text('profile-title', m.profile ? 'Profile: ' + m.profile.title : 'No profile available yet');
       if (dirty && edit && m.profile && (edit.profileKey !== m.profile.key || edit.context !== m.context)) {
@@ -264,18 +274,19 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
     }
     async function recoverCurrent() {
       if (stopped || changing || busy || mustRefresh || !recoveryConsent || !latest || !latest.recovery || !latest.recovery.available) return;
-      var bound = recoveryConsent; changing = true; buttons(); text('action-message', 'Saving the checked value in Manual…');
+      var bound = recoveryConsent; changing = true; buttons(); text('action-message', 'Saving the checked value…');
       var command = new AbortController(), timeout = setTimeout(function () { command.abort(); }, 30000);
       try {
         var url = new URL(window.location.href); url.pathname = url.pathname.replace(/\/ui\/?$/, '/recover'); url.search = '';
         var response = await fetch(url.href, { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: command.signal,
-          body: JSON.stringify({ context: bound.context, profileKey: bound.profileKey, value: bound.value, confirmSettled: true }) });
+          body: JSON.stringify({ context: bound.context, profileKey: bound.profileKey, value: bound.value, confirmSettled: true, action: 'reload_current' }) });
         var result = await response.json();
         if (!response.ok || result.saved !== true || result.calibrationCommandSent !== false) throw new Error('recovery_not_confirmed');
         if (!stopped) {
           dirty = false; edit = null; recoveryConsent = null; changing = false;
           document.getElementById('recovery-confirm').checked = false;
-          text('action-message', 'Kept ×' + result.value.toFixed(3) + ' in Manual for ' + result.profile + '. No new calibration change was sent.');
+          text('action-message', 'Kept ' + multiplier(result.value) + ' in ' + (result.mode === 'manual' ? 'Manual' : 'Automatic') +
+            ' for ' + result.profile + '. No new calibration change was sent.');
           await refresh();
         }
       } catch (error) {

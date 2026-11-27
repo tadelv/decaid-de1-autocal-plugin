@@ -99,6 +99,9 @@ test('overlay is themed, escaped, responsive and offers explicit mode controls, 
   assert.ok(!response.body.includes('javascript:evil()'));
   assert.match(response.body, /streamline:ready/); assert.match(response.body, /streamline:size/); assert.match(response.body, /streamline:close/);
   assert.match(response.body, /Use manual/); assert.match(response.body, /max-width/);
+  const panel = response.body.match(/<section id="recovery-panel"[\s\S]*?<\/section>/)[0];
+  assert.match(panel, /type="checkbox"/);
+  assert.ok(!/type="text"/.test(panel), 'recovery has no free-form target entry');
   assert.ok(response.body.includes("method: 'POST'"));
   assert.match(response.body, /0\.350–2\.000/);
 });
@@ -128,11 +131,13 @@ function browser(h = harness()) {
       b.reads++;
       const route = new URL(url).pathname;
       if (route.endsWith('/recover')) {
-        const command = JSON.parse(init.body); assert.equal(init.method, 'POST'); b.recoveries.push(command);
+        const command = JSON.parse(init.body); assert.equal(init.method, 'POST'); assert.equal(init.headers['Content-Type'], 'application/json');
+        b.recoveries.push(command);
         if (b.failRecovery) throw new Error('lost recovery response');
-        b.model.profile.mode = 'manual'; b.model.profile.manualValue = command.value;
-        b.model.canSetMode = true; b.model.recovery = null; b.model.context = 'recovered';
-        return { ok: true, json: async () => ({ saved: true, profile: b.model.profile.title, mode: 'manual', value: command.value, calibrationCommandSent: false }) };
+        const mode = (b.model.recovery && b.model.recovery.mode) || 'auto', paused = b.model.recovery && b.model.recovery.command;
+        b.model.profile.mode = mode; b.model.profile.manualValue = mode === 'manual' ? command.value : null;
+        b.model.value = command.value; b.model.canSetMode = true; b.model.recovery = null; b.model.context = 'recovered';
+        return { ok: true, json: async () => ({ saved: true, profile: b.model.profile.title, mode, value: command.value, command: paused, calibrationCommandSent: false }) };
       }
       if (route.endsWith('/mode')) {
         assert.equal(init.method, 'POST'); assert.equal(init.headers['Content-Type'], 'application/json');
@@ -265,29 +270,71 @@ test('browser command failures tell the user what to do without exposing backend
   }
 });
 
-test('recovery requires explicit settled-change confirmation and sends only the reviewed Manual adoption', async () => {
+test('recovery requires explicit settled-change confirmation and sends only the reviewed mode-preserving reload', async () => {
   const b = browser(), e = b.elements;
-  b.model.canSetMode = false; b.model.mode = 'Calibration paused'; b.model.value = 2;
-  b.model.recovery = { available: true, context: 'epoch-1', profileKey: 'filter3', profileTitle: 'Filter 3', value: 2, serial: 'target', model: 'DE1Pro' };
+  b.model.canSetMode = false; b.model.mode = 'Calibration paused'; b.model.value = 1;
+  b.model.recovery = { available: true, action: 'reload_current', mode: 'auto', context: 'epoch-1', profileKey: 'filter3', profileTitle: 'Filter 3', value: 1, command: 2, serial: 'target', model: 'DE1Pro' };
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(e['recovery-panel'].hidden, false); assert.equal(e.recover.disabled, true);
+  assert.match(e['recovery-values'].textContent, /Mode: Automatic/);
+  assert.match(e['recovery-values'].textContent, /paused request ×2\.000/);
+  assert.match(e['recovery-values'].textContent, /current machine value ×1\.000/);
+  assert.equal(e.recover.textContent, 'Keep ×1.000 in Automatic');
   await e.recover.listeners.click(); assert.equal(b.recoveries.length, 0);
   e['recovery-confirm'].checked = true; e['recovery-confirm'].listeners.change();
   assert.equal(e.recover.disabled, false); await e.recover.listeners.click();
-  assert.deepEqual(b.recoveries, [{ context: 'epoch-1', profileKey: 'filter3', value: 2, confirmSettled: true }]);
+  assert.deepEqual(b.recoveries, [{ context: 'epoch-1', profileKey: 'filter3', value: 1, confirmSettled: true, action: 'reload_current' }]);
   assert.equal(b.commands.length, 0); assert.equal(e['recovery-panel'].hidden, true);
   assert.match(e['action-message'].textContent, /No new calibration change/);
+  assert.match(e['action-message'].textContent, /Kept ×1\.000 in Automatic for Filter 3/);
+});
+
+test('recovery copy keeps a Manual profile in Manual and shows the paused request against the read-back', async () => {
+  const b = browser(), e = b.elements;
+  b.model.canSetMode = false; b.model.value = 1; b.model.profile = { key: 'filter3', title: 'Filter 3', mode: 'manual', manualValue: 2 };
+  b.model.recovery = { available: true, action: 'reload_current', mode: 'manual', context: 'epoch-1', profileKey: 'filter3', profileTitle: 'Filter 3', value: 1, command: 2 };
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(e['recovery-values'].textContent, /Mode: Manual/);
+  assert.equal(e.recover.textContent, 'Keep ×1.000 in Manual');
+  e['recovery-confirm'].checked = true; e['recovery-confirm'].listeners.change();
+  await e.recover.listeners.click();
+  assert.deepEqual(b.recoveries, [{ context: 'epoch-1', profileKey: 'filter3', value: 1, confirmSettled: true, action: 'reload_current' }]);
+  assert.equal(b.model.profile.mode, 'manual'); assert.equal(b.model.profile.manualValue, 1);
+  assert.match(e['action-message'].textContent, /Kept ×1\.000 in Manual for Filter 3/);
 });
 
 test('changed recovery context clears consent; failed recovery is never retried by polling', async () => {
   const b = browser(), e = b.elements;
-  b.model.canSetMode = false; b.model.recovery = { available: true, context: 'epoch-1', profileKey: 'filter3', profileTitle: 'Filter 3', value: 2 };
+  b.model.canSetMode = false; b.model.recovery = { available: true, action: 'reload_current', mode: 'auto', context: 'epoch-1', profileKey: 'filter3', profileTitle: 'Filter 3', value: 2, command: 2 };
   await new Promise(resolve => setImmediate(resolve));e['recovery-confirm'].checked = true;e['recovery-confirm'].listeners.change();
   b.model.recovery = { ...b.model.recovery, context: 'changed', value: 1.9 };await b.timers[0]();
   assert.equal(e['recovery-confirm'].checked, false);assert.equal(e.recover.disabled, true);
+  e['recovery-confirm'].checked = true;e['recovery-confirm'].listeners.change();
+  b.model.recovery = { ...b.model.recovery, mode: 'manual' };await b.timers[0]();
+  assert.equal(e['recovery-confirm'].checked, false, 'a mode change invalidates consent');assert.equal(e.recover.disabled, true);
+  b.model.recovery = { ...b.model.recovery, mode: 'auto' };
   e['recovery-confirm'].checked = true;e['recovery-confirm'].listeners.change();b.failRecovery = true;
   await e.recover.listeners.click();assert.equal(b.recoveries.length, 1);assert.equal(e.recover.disabled, true);
   await b.timers[0]();assert.equal(b.recoveries.length, 1);assert.match(e['action-message'].textContent, /Check again/);
+});
+
+test('a changed paused command or intent ends recovery consent even when the value and mode look the same', async () => {
+  const b = browser(), e = b.elements;
+  b.model.canSetMode = false; b.model.value = 1;
+  b.model.recovery = { available: true, action: 'reload_current', mode: 'auto', context: 'epoch-1', profileKey: 'filter3', profileTitle: 'Filter 3', value: 1, command: 2, intent: 'p:filter3|2|2' };
+  await new Promise(resolve => setImmediate(resolve));
+  e['recovery-confirm'].checked = true; e['recovery-confirm'].listeners.change();
+  assert.equal(e.recover.disabled, false); assert.equal(b.recoveries.length, 0);
+  b.model.recovery = { ...b.model.recovery, command: 2.5 }; await b.timers[0]();
+  assert.equal(e['recovery-confirm'].checked, false, 'a changed paused command invalidates consent');
+  assert.equal(e.recover.disabled, true);
+  e['recovery-confirm'].checked = true; e['recovery-confirm'].listeners.change();
+  b.model.recovery = { ...b.model.recovery, intent: 'p:filter3|2|3' }; await b.timers[0]();
+  assert.equal(e['recovery-confirm'].checked, false, 'a changed pending identity invalidates consent');
+  assert.equal(e.recover.disabled, true); assert.equal(b.recoveries.length, 0);
+  e['recovery-confirm'].checked = true; e['recovery-confirm'].listeners.change();
+  await b.timers[0]();
+  assert.equal(e.recover.disabled, false, 'an unchanged review keeps the consent');
 });
 
 test('surface survives the real Streamline parser', { skip: !process.env.STREAMLINE_SOURCE }, async () => {
