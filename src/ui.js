@@ -28,6 +28,7 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
     var messages = {
       recovered_manual: 'The checked value was kept in Manual. No new calibration change was sent.',
       recovered_auto: 'The checked value was kept in Automatic as the new starting value. No new calibration change was sent.',
+      auto_started_from_current: 'Automatic starts from the current machine value. No new calibration change was sent.',
       armed_for_new_shots: 'Ready for your next shot.', applied_verified: 'The new value was checked on the machine.',
       no_write_needed: 'The value is close enough; no change was needed.', new_target: 'A new value was estimated from the last shot.',
       no_fit: 'Not enough usable shot data to suggest a new value.', manual_shot_ignored: 'Manual mode kept your chosen value.',
@@ -59,6 +60,7 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
     var fitted = decisions.find(function (d) { return d.reason === 'new_target' && d.fit && d.fit.fitted; });
     var applied = decisions.find(function (d) { return d.reason === 'applied_verified'; });
     var profile = s.profile || null, manual = profile && profile.mode === 'manual';
+    var remembered = profile && typeof profile.rememberedManual === 'number' ? profile.rememberedManual : null;
     var mode = s.held ? 'Calibration paused' : s.stopped ? 'Calibration stopped' : !s.enabled ? 'Calibration is off'
       : !s.ready ? 'Connecting to your machine…' : s.unresolvedIntent ? 'Checking the last change…'
       : s.pending ? (manual ? 'Manual ×' + profile.manualValue.toFixed(3) + ' saved — not applied yet' : 'Waiting for the machine to be idle')
@@ -74,7 +76,8 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
       : !s.ready || s.stopped ? 'Wait until the machine is connected and calibration is ready.'
       : unavailable || !number(value) ? 'Check the machine connection, then tap Check again.'
       : !s.canSetMode ? 'Wait for the current change to finish.'
-      : 'Auto restores the saved automatic or starting value, then uses new shots.';
+      : 'Auto starts from the value your machine shows now, then uses new shots.' +
+        (!manual && remembered !== null ? ' Saved Manual ×' + remembered.toFixed(3) + ' is kept for when you choose it.' : '');
     var notice = unavailable ? (unavailable === 'target_not_configured' ? 'Enter your DE1 serial number in the plugin settings first.'
       : unavailable === 'wrong_machine' || unavailable === 'machine_changed' ? 'Connect the DE1 selected in the plugin settings, then tap Check again.'
       : 'Cannot read the selected DE1. Check its connection, then tap Check again.')
@@ -169,7 +172,7 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
         '<section class="card" id="card" aria-labelledby="heading"><h1 id="heading">Flow calibration</h1><p class="muted">Flow multiplier on your machine</p><p class="muted" id="profile-title"></p>' +
         '<div class="value" id="value">—</div><p class="muted" id="read-time">Checking your machine…</p><p id="mode" role="status" aria-live="polite"></p>' +
         '<form id="override-form"><label for="manual-value">Manual value (0.350–2.000)</label><div class="controls"><button type="button" id="use-auto">Auto</button><input id="manual-value" type="text" inputmode="decimal" autocomplete="off" maxlength="8" aria-label="Manual value, 0.350 to 2.000"><button type="submit" id="set-manual">Use manual</button></div></form>' +
-        '<p class="muted" id="control-help">Auto restores the saved automatic or starting value, then uses new shots.</p><p class="muted" id="action-message" role="status" aria-live="polite"></p>' +
+        '<p class="muted" id="control-help">Auto starts from the value your machine shows now, then uses new shots.</p><p class="muted" id="action-message" role="status" aria-live="polite"></p>' +
         '<section id="recovery-panel" hidden aria-labelledby="recovery-heading"><h2 id="recovery-heading">Review the paused change</h2><p id="recovery-summary"></p><p id="recovery-values"></p><label><input id="recovery-confirm" type="checkbox"> I checked this machine and value, and the previous change has finished.</label><button type="button" id="recover" disabled>Keep current value</button></section>' +
         '<details id="fit-details"><summary>More details</summary><dl><div><dt>Verification checks</dt><dd id="verification">—</dd></div><div><dt>Last suggested value</dt><dd id="target">—</dd></div><div><dt>Last value set</dt><dd id="applied">—</dd></div><div><dt>Shot data used</dt><dd id="coverage">—</dd></div><div><dt>Shot</dt><dd id="shot">—</dd></div><div><dt>Data notes</dt><dd id="warnings">—</dd></div><div><dt>Last update</dt><dd id="result">—</dd></div><div><dt>Support code</dt><dd id="support-code">—</dd></div></dl>' +
         '<footer class="muted">This changes the machine’s flow estimate, not the profile’s flow target. Trial version: wait for a change to finish before starting another shot. A change already sent to the machine cannot be cancelled; Check again can keep a paused change’s current value in that profile’s own Auto or Manual mode without sending a calibration command. Manual values follow profile names, even after recipe edits. Profiles with the same name share a value; renamed profiles need a new choice.</footer></details>' +
@@ -188,7 +191,7 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
       document.getElementById('refresh').disabled = changing;
       document.getElementById('manual-value').disabled = !allowed;
       document.getElementById('set-manual').disabled = !allowed || busy;
-      document.getElementById('use-auto').disabled = !allowed || busy || latest.profile.mode === 'auto';
+      document.getElementById('use-auto').disabled = !allowed || busy;
       document.getElementById('recover').disabled = changing || busy || mustRefresh || !recoveryConsent || !latest || !latest.recovery || !latest.recovery.available;
     }
     function paint(m) {
@@ -213,8 +216,10 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
       if (dirty && edit && m.profile && (edit.profileKey !== m.profile.key || edit.context !== m.context)) {
         mustRefresh = true; text('action-message', 'This page is out of date. Tap Check again before saving.');
       }
-      if (!dirty) document.getElementById('manual-value').value = typeof (m.profile && m.profile.manualValue) === 'number' ? m.profile.manualValue.toFixed(3) : typeof m.value === 'number' ? m.value.toFixed(3) : '';
-      text('control-help', m.controlsHelp || 'Auto restores the saved automatic or starting value, then uses new shots.');
+      if (!dirty) document.getElementById('manual-value').value = typeof (m.profile && m.profile.manualValue) === 'number' ? m.profile.manualValue.toFixed(3)
+        : typeof (m.profile && m.profile.rememberedManual) === 'number' ? m.profile.rememberedManual.toFixed(3)
+        : typeof m.value === 'number' ? m.value.toFixed(3) : '';
+      text('control-help', m.controlsHelp || 'Auto starts from the value your machine shows now, then uses new shots.');
       buttons();
       text('value', multiplier(m.value));
       text('read-time', m.error ? 'Cannot read the machine' : m.readAt ? 'Checked at ' + new Date(m.readAt).toLocaleTimeString() : 'No value read yet');
@@ -265,7 +270,10 @@ function createFlowCalibrationUI(host, read, state, pin, models) {
           dirty = false; edit = null; changing = false;
           document.getElementById('manual-value').blur(); document.getElementById('card').scrollTop = 0;
           text('action-message', result.waiting ? 'Saved for ' + result.profile + '. Not applied to the machine yet.'
-            : mode === 'manual' ? 'Manual ×' + value.toFixed(3) + ' saved for ' + result.profile + '.' : 'Automatic calibration selected for ' + result.profile + '.');
+            : mode === 'manual' ? 'Manual ×' + value.toFixed(3) + ' saved for ' + result.profile + '.'
+            : 'Automatic selected for ' + result.profile + '. ' +
+              (typeof result.value === 'number' ? 'It starts from ' + multiplier(result.value) : 'It starts from the current machine value') +
+              '; no change was sent.');
           await refresh();
         }
       } catch (error) {

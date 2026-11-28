@@ -1,6 +1,6 @@
 # Auto Flow Calibration — Decaid plugin
 
-**2.0.2 upgrades the existing plugin, not a new plugin.** Its ID remains **`auto-flow-cal.reaplugin`**, so Decaid can update the original installation. This [recovery release](docs/RELEASE-2.0.2.md) lets **Check again** keep the paused change's current value in the profile's **own** Auto or Manual mode, without sending a calibration command. It builds on the 2.0.1 delayed-profile-event fix. Calibration still requires supervised use.
+**2.0.3 upgrades the existing plugin, not a new plugin.** Its ID remains **`auto-flow-cal.reaplugin`**, so Decaid can update the original installation. This [release](docs/RELEASE-2.0.3.md) makes **Auto** always start from the **current machine multiplier** without sending a calibration command, and keeps a saved **Manual** value separately so it no longer seeds Auto. It builds on the [2.0.2 recovery release](docs/RELEASE-2.0.2.md), whose mode-preserving **Check again** panel and the 2.0.1 delayed-profile-event fix are unchanged. Calibration still requires supervised use.
 
 It brings the displayed scale weight-flow and machine water-flow lines closer by adjusting the machine's estimation multiplier between shots. Calibration can affect flow-controlled extraction, not only the chart. Keep testing supervised.
 
@@ -13,29 +13,31 @@ It brings the displayed scale weight-flow and machine water-flow lines closer by
 
 ## Manual and Auto
 
-**Manual** keeps a chosen multiplier for that named profile and DE1, across shots, recipe edits, profile changes and restart. Manual shots do not train automatic estimates. **Auto** recalls the current recipe's verified automatic value, or the starting baseline, and learns from subsequent usable shots.
+**Manual** keeps a chosen multiplier for that named profile and DE1, across shots, recipe edits, profile changes and restart. Manual shots do not train automatic estimates. **Auto** starts from the multiplier the machine shows at that moment and learns from subsequent usable shots: selecting Auto sends no calibration command and recalls neither an older Automatic value, the machine baseline nor the saved Manual value. Auto can be selected again while already in Automatic to start from the current reading.
+
+A saved Manual value is remembered independently of the current mode, so Manual **2.000** stays visible and offered while Automatic runs at **×1.000**, and **Use manual** applies it again through the guarded path. Unsaved text is never saved, and selecting Auto never overwrites the remembered value. Returning to a profile still recalls its last effective Automatic calibration or its active Manual choice.
 
 Manual choices currently use the exact profile title per DE1. Same-named profiles share a choice; renaming requires choosing again. Automatic estimates use the exact title/version/steps. [Issue #1](https://github.com/tadelv/decaid-de1-autocal-plugin/issues/1) tracks stronger profile matching.
 
-## Recovering a paused change (2.0.2)
+## Recovering a paused change (2.0.2, unchanged in 2.0.3)
 
 When a change is paused, **Check again** reviews the current machine, profile, state and saved request. The panel shows the profile's mode, the multiplier that was requested and the value the machine reports now; they may differ. After independently confirming the previous change has finished, the operator can keep the current value as it is:
 
 - **An Auto profile stays Auto.** The checked value becomes that profile's new starting point and expected machine value. Recovery itself sends **no calibration command**, does not recall the old requested value and does not mark the old attempt as verified. Only a genuinely new shot after recovery can teach Auto again; a delayed pre-recovery shot is excluded.
 - **A Manual profile stays Manual.** Its saved manual value is replaced with the checked value, and its automatic record is kept for a later explicit Auto.
 
-Other profiles, machine values and histories are preserved; the ledger is not reset. The confirmation is supervised policy, not proof that the host queue is empty: a matching number cannot prove an earlier queued command finished, and clearing the paused record cannot cancel a command already sent.
+Other profiles, machine values and histories are preserved; the ledger is not reset. The confirmation is supervised policy, not proof that the host queue is empty: a matching number cannot prove an earlier queued command finished, and clearing the paused record cannot cancel a command already sent. Selecting Auto does not clear a paused change; recovery still requires its explicit confirmation.
 
 ## Installation and settings
 
-[Decaid installation instructions](https://decentespresso.com/docs/how_to_install_skins_or_plugins_on_decaid). Use the release's **`auto-flow-cal-v2.0.2.zip`**, or the checked-in `auto-flow-cal.reaplugin/` directory. It contains the complete built plugin; copying `src/plugin.js` alone does not work. The normal public GitHub installation route uses the latest published release.
+[Decaid installation instructions](https://decentespresso.com/docs/how_to_install_skins_or_plugins_on_decaid). Use the release's **`auto-flow-cal-v2.0.3.zip`**, or the checked-in `auto-flow-cal.reaplugin/` directory. It contains the complete built plugin; copying `src/plugin.js` alone does not work. The normal public GitHub installation route uses the latest published release.
 
 | Setting | Fresh default | Meaning |
 |---|---|---|
 | Enable calibration changes | Off | Allow automatic and manual changes on the selected DE1 |
 | DE1 serial number | Empty | Exact machine pin; blank prevents changes |
 
-Only traditional DE1 models are supported, never Bengle. The host must acknowledge matching `storageWrite` events and provide `events.machine` / `stateUpdate`. Missing identity, storage acknowledgement, scale evidence or valid measurements fails closed.
+Only traditional DE1 models are supported, never Bengle. The host must acknowledge matching `storageWrite` events and provide `events.machine` / `stateUpdate`. Missing identity, storage acknowledgement, scale evidence or valid measurements fails closed. A 2.0.2 ledger loads unchanged: a valid active Manual choice is always what the remembered value reports — even when a memory map written by an earlier 2.0.3 start is preserved across a 2.0.2 round trip without that entry — and is stored additively, with no new key or required schema change.
 
 **No old-settings migration is provided, as requested by the sole operator.** The v2 ledger uses the new `calibration-v2` key in the original plugin namespace. The old 1.x `state` entry is left untouched; temporary `-updater` state is not imported. Configure the serial and enable explicitly. Existing old settings are not a substitute for the new serial pin. First arming adopts the current live multiplier and fences existing shot history without a calibration command.
 
@@ -58,7 +60,7 @@ GET /api/v1/plugins/auto-flow-cal.reaplugin/ui
 GET /api/v1/plugins/auto-flow-cal.reaplugin/view
 ```
 
-`status` reads memory only. `view` independently reads the selected machine; while an intent is held, it also reviews current workflow/state for recovery. `skin` and `ui` render cached data and declarations. These GETs never clear an intent or send calibration commands. Explicit POST `mode` selects Manual/Auto; POST `recover` requires an operator-confirmed review and keeps the checked value in the profile's own mode without resending it. A differing read-back needs the explicit `action: 'reload_current'` discriminator; an older matching-only request without it keeps the 2.0.1 Manual behavior and fails clearly on a mismatch. Both preserve target, context, idle and persistence guards.
+`status` reads memory only. `view` independently reads the selected machine; while an intent is held, it also reviews current workflow/state for recovery. `skin` and `ui` render cached data and declarations. These GETs never clear an intent or send calibration commands. Explicit POST `mode` selects Manual/Auto — Automatic rebases only that profile's starting value to the live reading and sends nothing, while Manual keeps its guarded application — and POST `recover` requires an operator-confirmed review and keeps the checked value in the profile's own mode without resending it. A differing read-back needs the explicit `action: 'reload_current'` discriminator; an older matching-only request without it keeps the 2.0.1 Manual behavior and fails clearly on a mismatch. Both preserve target, context, idle and persistence guards.
 
 ## Development
 
@@ -74,6 +76,6 @@ npm run fit:offline -- --v2          # current zero-lag fitter, offline sanitize
 
 Current controller and UI tests run against the real compiled bundle. Frozen 1.4 code lives under `test/legacy/` only, with explicitly named legacy tests and `tools/legacy-why-skip.js` for historical diagnostics; it is not bundled. Sanitized real-shot fixtures contain no machine identity or personal shot metadata. The separate historical [observer](observer/README.md) remains research tooling, not a second calibration writer.
 
-Release tags must match the manifest (`v2.0.2`). The workflow prepares **drafts only**; publication requires operator approval. [Recovery release notes and validation limits](docs/RELEASE-2.0.2.md); the earlier [2.0.1 hotfix notes](docs/RELEASE-2.0.1.md) remain historical. [Recorded supervised-trial evidence](docs/trial-results.md).
+Release tags must match the manifest (`v2.0.3`). The workflow prepares **drafts only**; publication requires operator approval. [2.0.3 release notes and validation limits](docs/RELEASE-2.0.3.md); the [2.0.2 recovery notes](docs/RELEASE-2.0.2.md) and the earlier [2.0.1 hotfix notes](docs/RELEASE-2.0.1.md) remain historical. [Recorded supervised-trial evidence](docs/trial-results.md).
 
 The earlier Design and Implementation Plan describe 1.x and remain historical references. The current behavior and limitations are documented here, in the UI notes and regression tests.
